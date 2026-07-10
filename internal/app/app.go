@@ -11,6 +11,7 @@ import (
 	"github.com/tristanMatthias/agenttasks/internal/oidc"
 	"github.com/tristanMatthias/agenttasks/internal/tenant"
 	"github.com/tristanMatthias/tasks/pkg/httpapi"
+	"github.com/tristanMatthias/tasks/pkg/mcpsrv"
 	"github.com/tristanMatthias/tasks/web"
 )
 
@@ -64,6 +65,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	srv := httpapi.New(httpapi.Config{
 		Auth:        authn,
 		Resolve:     mgr.Resolve,
+		MCP:         mcpsrv.HandlerResolved(mgr.Resolve), // per-tenant MCP at /mcp (auth-gated)
 		LoginURL:    loginURL,
 		Static:      web.Static(),
 		Logger:      cfg.Logger,
