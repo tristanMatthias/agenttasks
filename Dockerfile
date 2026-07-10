@@ -7,10 +7,9 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/agenttasks ./cmd/agenttasks
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 app
-# Tenant DBs live here; mount a persistent disk at /data in production.
-RUN mkdir -p /data/tenants && chown -R app /data
-USER app
+RUN apk add --no-cache ca-certificates
+# Tenant DBs live under the persistent disk mounted at /data in production.
+# Run as root so the mounted disk (owned by root) is writable.
 ENV AGENTTASKS_DATA_DIR=/data/tenants
 ENV AGENTTASKS_BEHIND_PROXY=true
 COPY --from=build /out/agenttasks /usr/local/bin/agenttasks
