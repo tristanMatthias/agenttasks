@@ -53,15 +53,18 @@ var signInTmpl = template.Must(template.New("signin").Parse(`<!doctype html>
   type="text/javascript"></script>
 <script>
 window.addEventListener("load", async () => {
+  const app = document.getElementById("app");
   try {
     await Clerk.load();
     if (Clerk.user) { window.location.replace("/"); return; }
-    Clerk.mountSignIn(document.getElementById("app"), {
+    app.innerHTML = ""; // clear the "Loading…" placeholder before mounting
+    Clerk.mountSignIn(app, {
       afterSignInUrl: "/", afterSignUpUrl: "/",
       signUpUrl: "/sign-in",
+      appearance: { variables: { colorPrimary: "#7aa2f7" } },
     });
   } catch (e) {
-    document.getElementById("app").textContent = "Sign-in failed to load: " + e.message;
+    app.textContent = "Sign-in failed to load: " + e.message;
   }
 });
 </script>
