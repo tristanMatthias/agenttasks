@@ -72,7 +72,10 @@ func (m *Manager) CoreFor(org string) (*core.Core, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, err := core.New(st, core.Options{Prefix: m.prefix, Actor: "user"})
+	// KeySelector embeds the org into minted API tokens (tasks_<org>_<secret>) so
+	// a bare bot token routes back to this tenant. The cache key is the same raw
+	// org, so the key path and the JWT path share one Core per tenant.
+	c, err := core.New(st, core.Options{Prefix: m.prefix, Actor: "user", KeySelector: org})
 	if err != nil {
 		st.Close()
 		return nil, err

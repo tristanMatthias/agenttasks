@@ -51,6 +51,8 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		authn = a
 	}
 	mgr := tenant.New(tenant.Options{Dir: cfg.DataDir, Prefix: cfg.Prefix, OnChange: cfg.OnTenantChange})
+	// Accept per-tenant API keys (tasks_<org>_<secret>) in front of JWT sessions.
+	authn = composite{jwt: authn, tenants: mgr}
 	burst := int(cfg.RateLimit) * 2
 	if burst < 40 {
 		burst = 40
