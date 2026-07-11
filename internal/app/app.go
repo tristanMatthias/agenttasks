@@ -5,9 +5,11 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"log/slog"
 	"net/http"
 
+	"github.com/tristanMatthias/agenttasks/internal/oauth"
 	"github.com/tristanMatthias/agenttasks/internal/oidc"
 	"github.com/tristanMatthias/agenttasks/internal/tenant"
 	"github.com/tristanMatthias/tasks/pkg/httpapi"
@@ -24,6 +26,8 @@ type Config struct {
 	Prefix         string
 	PublishableKey string // Clerk pk_live_/pk_test_ for the sign-in page
 	LoginURL       string // where the UI sends unauthenticated visitors (default /sign-in)
+	PublicURL      string // public base URL (e.g. https://agenttasks.sh); enables the OAuth AS
+	OAuthSecret    string // HMAC secret for OAuth client_ids/codes; random if empty
 	BehindProxy    bool
 	RateLimit      float64
 	Logger         *slog.Logger
@@ -43,6 +47,9 @@ type App struct {
 
 // New builds the control plane.
 func New(ctx context.Context, cfg Config) (*App, error) {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
 	authn := cfg.Auth
 	if authn == nil {
 		a, err := oidc.New(ctx, oidc.Config{JWKSURL: cfg.JWKSURL, Issuer: cfg.Issuer, OrgClaim: cfg.OrgClaim})
@@ -51,6 +58,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		}
 		authn = a
 	}
+	jwtAuth := authn // the identity-provider authenticator (reads the Clerk session)
 	mgr := tenant.New(tenant.Options{Dir: cfg.DataDir, Prefix: cfg.Prefix, OnChange: cfg.OnTenantChange})
 	// Accept per-tenant API keys (tasks_<org>_<secret>) in front of JWT sessions.
 	authn = composite{jwt: authn, tenants: mgr}
@@ -62,27 +70,73 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	if loginURL == "" && cfg.PublishableKey != "" {
 		loginURL = "/sign-in"
 	}
+
+	// OAuth authorization server (for browser MCP clients like claude.ai). It
+	// authenticates the human via their Clerk session and mints a tenant-scoped
+	// key as the access token — validated by the same composite authenticator.
+	var oauthProv *oauth.Provider
+	resourceMeta := ""
+	if cfg.PublicURL != "" {
+		secret := []byte(cfg.OAuthSecret)
+		if len(secret) == 0 {
+			secret = make([]byte, 32)
+			_, _ = rand.Read(secret)
+			cfg.Logger.Warn("AGENTTASKS_OAUTH_SECRET unset — using an ephemeral key; OAuth registrations reset on restart")
+		}
+		oauthProv = oauth.New(oauth.Config{
+			Issuer:    cfg.PublicURL,
+			Resource:  cfg.PublicURL + "/mcp",
+			SignInURL: "/sign-in",
+			HMACKey:   secret,
+			Logger:    cfg.Logger,
+			AuthUser: func(r *http.Request) (string, bool) {
+				id, ok := jwtAuth.Authorize(r)
+				if !ok || id.Claims["org"] == "" {
+					return "", false
+				}
+				return id.Claims["org"], true
+			},
+			Mint: func(org string) (string, error) {
+				c, err := mgr.CoreFor(org)
+				if err != nil {
+					return "", err
+				}
+				k, err := c.CreateKey("Claude web (OAuth)", "oauth")
+				if err != nil {
+					return "", err
+				}
+				return k.Secret, nil
+			},
+		})
+		resourceMeta = cfg.PublicURL + "/.well-known/oauth-protected-resource"
+	}
+
 	srv := httpapi.New(httpapi.Config{
-		Auth:        authn,
-		Resolve:     mgr.Resolve,
-		MCP:         mcpsrv.HandlerResolved(mgr.Resolve), // per-tenant MCP at /mcp (auth-gated)
-		LoginURL:    loginURL,
-		Static:      web.Static(),
-		Logger:      cfg.Logger,
-		BehindProxy: cfg.BehindProxy,
-		RateLimit:   cfg.RateLimit,
-		RateBurst:   burst,
-		Metrics:     true,
+		Auth:                authn,
+		Resolve:             mgr.Resolve,
+		MCP:                 mcpsrv.HandlerResolved(mgr.Resolve), // per-tenant MCP at /mcp (auth-gated)
+		LoginURL:            loginURL,
+		ResourceMetadataURL: resourceMeta,
+		Static:              web.Static(),
+		Logger:              cfg.Logger,
+		BehindProxy:         cfg.BehindProxy,
+		RateLimit:           cfg.RateLimit,
+		RateBurst:           burst,
+		Metrics:             true,
 	})
 
-	// Front the tasks handler with the hosted sign-in page (ClerkJS).
+	// Front the tasks handler with public host endpoints (sign-in page + OAuth AS).
 	handler := http.Handler(srv.Handler())
-	if cfg.PublishableKey != "" {
-		frontendAPI := frontendAPIFromPublishableKey(cfg.PublishableKey)
-		sign := signInHandler(cfg.PublishableKey, frontendAPI)
+	if cfg.PublishableKey != "" || oauthProv != nil {
 		mux := http.NewServeMux()
-		mux.HandleFunc("GET /sign-in", sign)
-		mux.HandleFunc("GET /sign-up", sign)
+		if cfg.PublishableKey != "" {
+			sign := signInHandler(cfg.PublishableKey, frontendAPIFromPublishableKey(cfg.PublishableKey))
+			mux.HandleFunc("GET /sign-in", sign)
+			mux.HandleFunc("GET /sign-up", sign)
+		}
+		if oauthProv != nil {
+			oauthProv.Register(mux)
+		}
 		mux.Handle("/", srv.Handler())
 		handler = mux
 	}

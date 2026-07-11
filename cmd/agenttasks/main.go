@@ -48,6 +48,8 @@ func main() {
 		Prefix:         env("AGENTTASKS_PREFIX", "t"),
 		PublishableKey: env("AGENTTASKS_CLERK_PUBLISHABLE_KEY", os.Getenv("CLERK_PUBLISHABLE_KEY")),
 		LoginURL:       os.Getenv("AGENTTASKS_LOGIN_URL"),
+		PublicURL:      env("AGENTTASKS_PUBLIC_URL", "https://agenttasks.sh"),
+		OAuthSecret:    os.Getenv("AGENTTASKS_OAUTH_SECRET"),
 		BehindProxy:    os.Getenv("AGENTTASKS_BEHIND_PROXY") == "true",
 		RateLimit:      20,
 		Logger:         logger,

@@ -54,12 +54,19 @@ var signInTmpl = template.Must(template.New("signin").Parse(`<!doctype html>
 <script>
 window.addEventListener("load", async () => {
   const app = document.getElementById("app");
+  // Honor a local redirect target (e.g. the OAuth /authorize flow). Only same-site
+  // absolute paths are allowed, to avoid an open redirect.
+  let dest = "/";
+  try {
+    const rp = new URLSearchParams(location.search).get("redirect_url");
+    if (rp && rp.startsWith("/") && !rp.startsWith("//")) dest = rp;
+  } catch (_) {}
   try {
     await Clerk.load();
-    if (Clerk.user) { window.location.replace("/"); return; }
+    if (Clerk.user) { window.location.replace(dest); return; }
     app.innerHTML = ""; // clear the "Loading…" placeholder before mounting
     Clerk.mountSignIn(app, {
-      afterSignInUrl: "/", afterSignUpUrl: "/",
+      afterSignInUrl: dest, afterSignUpUrl: dest,
       signUpUrl: "/sign-in",
       appearance: { variables: { colorPrimary: "#7aa2f7" } },
     });
