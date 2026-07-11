@@ -161,8 +161,8 @@ func TestPublicUIStillWorks(t *testing.T) {
 	ts := httptest.NewServer(a.Handler)
 	defer ts.Close()
 
-	if code, body := req(t, ts, "GET", "/", "", ""); code != 200 || !strings.Contains(body, "login-overlay") {
-		t.Fatalf("UI should be public: %d", code)
+	if code, body := req(t, ts, "GET", "/", "", ""); code != 200 || !strings.Contains(body, `id="app"`) {
+		t.Fatalf("UI should be public (SPA root): %d", code)
 	}
 	// authinfo reports custom mode (a provider owns login).
 	if code, body := req(t, ts, "GET", "/api/authinfo", "", ""); code != 200 || !strings.Contains(body, `"mode":"custom"`) {
