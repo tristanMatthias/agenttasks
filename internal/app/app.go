@@ -111,12 +111,20 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		resourceMeta = cfg.PublicURL + "/.well-known/oauth-protected-resource"
 	}
 
+	// Keep Clerk's session alive on the board page (ClerkJS refreshes the
+	// short-lived __session cookie), so refreshes don't bounce through /sign-in.
+	injectHead := ""
+	if cfg.PublishableKey != "" {
+		injectHead = clerkBootHead(cfg.PublishableKey, frontendAPIFromPublishableKey(cfg.PublishableKey))
+	}
+
 	srv := httpapi.New(httpapi.Config{
 		Auth:                authn,
 		Resolve:             mgr.Resolve,
 		MCP:                 mcpsrv.HandlerResolved(mgr.Resolve), // per-tenant MCP at /mcp (auth-gated)
 		LoginURL:            loginURL,
 		ResourceMetadataURL: resourceMeta,
+		InjectHead:          injectHead,
 		Static:              web.Static(),
 		Logger:              cfg.Logger,
 		BehindProxy:         cfg.BehindProxy,
