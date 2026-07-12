@@ -96,12 +96,20 @@ func (m *Manager) coreFor(org, slug string, seed bool) (*core.Core, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Prefix precedence mirrors core.New: an explicit prefix WINS and overwrites
-	// the stored one, so only set it when this is a genuinely new, empty
-	// workspace. Otherwise pass "" and let core.New keep the meta prefix (or
-	// derive it from existing ids). This preserves every existing board.
+	// A shared workspace's prefix lives authoritatively in the control store, so
+	// use it on EVERY path (browser, API key, OAuth). This avoids a cache-order
+	// hole: if a bot opened a brand-new workspace seed-lessly first, its Core
+	// would otherwise be cached prefix-less and never mint ids.
 	prefix := ""
-	if seed {
+	if m.ws != nil && !strings.HasPrefix(org, "u_") {
+		if ws, wErr := m.ws.Workspace(org); wErr == nil && ws.Prefix != "" {
+			prefix = ws.Prefix
+		}
+	}
+	// Personal (or a workspace with no stored prefix): seed only a genuinely new,
+	// empty board from the slug hint; otherwise let core.New keep the meta prefix
+	// (or derive it from existing ids), preserving every existing board.
+	if prefix == "" && seed {
 		if existing, _ := st.Meta("prefix"); existing == "" {
 			if n, _ := st.Count(); n == 0 {
 				prefix = m.prefixFrom(slug, org)

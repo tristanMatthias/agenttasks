@@ -1,6 +1,9 @@
 package workspaces
 
-import "net/http"
+import (
+	"net/http"
+	"strings"
+)
 
 // WorkspaceCookie names the cookie that selects the active workspace. It's only
 // a selector: the server re-verifies membership on every request, so a forged
@@ -30,11 +33,14 @@ func (s *Store) Active(sub string, r *http.Request) (id, prefix string) {
 	return ws.ID, ws.Prefix
 }
 
-// SetActiveCookie writes the active-workspace selector cookie.
-func SetActiveCookie(w http.ResponseWriter, id string) {
+// SetActiveCookie writes the active-workspace selector cookie. It's only a
+// selector (the server re-verifies membership every request), but we still mark
+// it HttpOnly + Lax + Secure-when-served-over-HTTPS.
+func SetActiveCookie(w http.ResponseWriter, r *http.Request, id string) {
 	http.SetCookie(w, &http.Cookie{
 		Name: WorkspaceCookie, Value: id, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
 		MaxAge: 365 * 24 * 60 * 60,
 	})
 }

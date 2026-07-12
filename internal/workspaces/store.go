@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -24,6 +25,16 @@ const (
 
 // ErrNotFound is returned when a workspace/invite lookup misses.
 var ErrNotFound = errors.New("not found")
+
+// ErrLastAdmin blocks demoting/removing a workspace's only admin.
+var ErrLastAdmin = errors.New("workspace needs an admin")
+
+// ErrInviteUsed / ErrInviteExpired / ErrInviteEmail reject a bad accept.
+var (
+	ErrInviteUsed    = errors.New("invite already used")
+	ErrInviteExpired = errors.New("invite has expired")
+	ErrInviteEmail   = errors.New("invite is for a different email")
+)
 
 // Workspace is a shared board with its own tenant DB and task-id prefix.
 type Workspace struct {
@@ -69,7 +80,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS memberships (
-  workspace_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   user_id      TEXT NOT NULL,
   email        TEXT NOT NULL DEFAULT '',
   name         TEXT NOT NULL DEFAULT '',
@@ -79,7 +90,7 @@ CREATE TABLE IF NOT EXISTS memberships (
 );
 CREATE TABLE IF NOT EXISTS invites (
   token        TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   role         TEXT NOT NULL,
   email        TEXT NOT NULL DEFAULT '',
   created_by   TEXT NOT NULL,
@@ -115,7 +126,8 @@ func Open(path string) (*Store, error) {
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
 
-func now() string { return time.Now().UTC().Format(time.RFC3339) }
+// now is RFC3339Nano so list ordering is stable even within the same second.
+func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 // CreateWorkspace inserts a workspace and its creator as the first admin, atomically.
 func (s *Store) CreateWorkspace(ws Workspace, creatorEmail, creatorName string) error {
@@ -226,18 +238,55 @@ func (s *Store) CountAdmins(workspaceID string) (int, error) {
 	return n, err
 }
 
-// UpdateMemberRole changes a member's role.
+// UpdateMemberRole changes a member's role. Demoting the workspace's only admin
+// is rejected atomically (the guard + write share one transaction), so two
+// concurrent demotions can't both slip through and leave zero admins.
 func (s *Store) UpdateMemberRole(workspaceID, userID, role string) error {
-	_, err := s.db.Exec(
-		`UPDATE memberships SET role = ? WHERE workspace_id = ? AND user_id = ?`, role, workspaceID, userID,
-	)
-	return err
+	return s.withGuardedAdminChange(workspaceID, userID, role != RoleAdmin, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE memberships SET role = ? WHERE workspace_id = ? AND user_id = ?`, role, workspaceID, userID)
+		return err
+	})
 }
 
-// RemoveMember removes a user from a workspace.
+// RemoveMember removes a user from a workspace (idempotent). Removing the only
+// admin is rejected atomically. Used for both admin-removal and self-leave.
 func (s *Store) RemoveMember(workspaceID, userID string) error {
-	_, err := s.db.Exec(`DELETE FROM memberships WHERE workspace_id = ? AND user_id = ?`, workspaceID, userID)
-	return err
+	return s.withGuardedAdminChange(workspaceID, userID, true, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM memberships WHERE workspace_id = ? AND user_id = ?`, workspaceID, userID)
+		return err
+	})
+}
+
+// withGuardedAdminChange runs mutate in a transaction that, when demoting is
+// true and the target is currently the last admin, returns ErrLastAdmin instead.
+func (s *Store) withGuardedAdminChange(workspaceID, userID string, demoting bool, mutate func(*sql.Tx) error) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var role string
+	err = tx.QueryRow(`SELECT role FROM memberships WHERE workspace_id = ? AND user_id = ?`, workspaceID, userID).Scan(&role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // not a member → nothing to do
+	}
+	if err != nil {
+		return err
+	}
+	if demoting && role == RoleAdmin {
+		var admins int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM memberships WHERE workspace_id = ? AND role = ?`, workspaceID, RoleAdmin).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return ErrLastAdmin
+		}
+	}
+	if err := mutate(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Rename updates a workspace's display name.
@@ -289,11 +338,13 @@ func (s *Store) Invite(token string) (Invite, error) {
 	return inv, err
 }
 
-// PendingInvites lists a workspace's unaccepted invites.
+// PendingInvites lists a workspace's unaccepted, unexpired invites.
 func (s *Store) PendingInvites(workspaceID string) ([]Invite, error) {
 	rows, err := s.db.Query(
 		`SELECT token, workspace_id, role, email, created_by, created_at, expires_at, accepted_at
-		 FROM invites WHERE workspace_id = ? AND accepted_at = '' ORDER BY created_at DESC`, workspaceID,
+		 FROM invites WHERE workspace_id = ? AND accepted_at = ''
+		   AND (expires_at = '' OR expires_at > ?)
+		 ORDER BY created_at DESC`, workspaceID, now(),
 	)
 	if err != nil {
 		return nil, err
@@ -327,8 +378,8 @@ func (s *Store) AcceptInvite(token, userID, email, name string) (string, error) 
 
 	var inv Invite
 	err = tx.QueryRow(
-		`SELECT workspace_id, role, email, accepted_at FROM invites WHERE token = ?`, token,
-	).Scan(&inv.WorkspaceID, &inv.Role, &inv.Email, &inv.AcceptedAt)
+		`SELECT workspace_id, role, email, expires_at, accepted_at FROM invites WHERE token = ?`, token,
+	).Scan(&inv.WorkspaceID, &inv.Role, &inv.Email, &inv.ExpiresAt, &inv.AcceptedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -336,22 +387,31 @@ func (s *Store) AcceptInvite(token, userID, email, name string) (string, error) 
 		return "", err
 	}
 	if inv.AcceptedAt != "" {
-		return "", errors.New("invite already used")
-	}
-	if inv.Email != "" && email != "" && inv.Email != email {
-		return "", errors.New("invite is for a different email")
+		return "", ErrInviteUsed
 	}
 	ts := now()
-	// Add membership (ignore if already a member — keep their existing role).
+	if inv.ExpiresAt != "" && ts > inv.ExpiresAt {
+		return "", ErrInviteExpired
+	}
+	// A restricted invite requires a matching email. If the accepter's session
+	// carries no email, they can't satisfy the restriction — reject (no bypass).
+	if inv.Email != "" && !strings.EqualFold(inv.Email, email) {
+		return "", ErrInviteEmail
+	}
+	// Claim the invite atomically first — the WHERE guards against a concurrent
+	// accept of the same token (only one UPDATE affects a row).
+	res, err := tx.Exec(`UPDATE invites SET accepted_by = ?, accepted_at = ? WHERE token = ? AND accepted_at = ''`, userID, ts, token)
+	if err != nil {
+		return "", err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return "", ErrInviteUsed
+	}
+	// Add membership (idempotent — an already-member accepter keeps their role).
 	if _, err := tx.Exec(
 		`INSERT INTO memberships (workspace_id, user_id, email, name, role, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(workspace_id, user_id) DO NOTHING`,
 		inv.WorkspaceID, userID, email, name, inv.Role, ts,
-	); err != nil {
-		return "", err
-	}
-	if _, err := tx.Exec(
-		`UPDATE invites SET accepted_by = ?, accepted_at = ? WHERE token = ?`, userID, ts, token,
 	); err != nil {
 		return "", err
 	}

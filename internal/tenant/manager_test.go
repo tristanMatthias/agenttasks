@@ -1,11 +1,46 @@
 package tenant
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/tristanMatthias/agenttasks/internal/workspaces"
 	"github.com/tristanMatthias/tasks/pkg/core"
 )
+
+// A shared workspace's prefix is authoritative from the control store, so even
+// the seed-less path (as an API key / OAuth client hitting a brand-new
+// workspace first) mints ids with the right prefix — no cache-order hole.
+func TestCoreFor_SharedPrefixAuthoritative(t *testing.T) {
+	dir := t.TempDir()
+	ws, err := workspaces.Open(filepath.Join(dir, "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	if err := ws.CreateWorkspace(workspaces.Workspace{ID: "ws_x", Name: "Acme", Slug: "acme", Prefix: "acme", CreatedBy: "u1"}, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Options{Dir: dir, Workspaces: ws})
+	defer m.Close()
+
+	// Seed-less CoreFor (the key/OAuth path) still gets the stored prefix.
+	c, err := m.CoreFor("ws_x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Prefix() != "acme" {
+		t.Fatalf("seed-less shared prefix = %q, want acme", c.Prefix())
+	}
+	task, err := c.Create(core.CreateParams{Title: "x"})
+	if err != nil {
+		t.Fatalf("create in shared workspace: %v", err)
+	}
+	if !strings.HasPrefix(task.ID, "acme-") {
+		t.Fatalf("task id = %q, want acme- prefix", task.ID)
+	}
+}
 
 // A brand-new workspace takes its task-id prefix from the org slug, and minted
 // ids actually carry it.

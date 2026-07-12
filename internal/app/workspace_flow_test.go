@@ -101,7 +101,11 @@ func TestWorkspaceFlow(t *testing.T) {
 	var inv struct{ Token string }
 	json.Unmarshal([]byte(body), &inv)
 
+	// The GET link is a confirm page (no mutation); joining is an explicit POST.
 	if code, _ := reqC(t, bob, ts, "GET", "/invite/"+inv.Token, tokB, ""); code != 200 {
+		t.Fatalf("invite landing = %d", code)
+	}
+	if code, _ := reqC(t, bob, ts, "POST", "/invite/"+inv.Token+"/accept", tokB, ""); code != 200 {
 		t.Fatalf("accept invite (follows redirect to board) = %d", code)
 	}
 	// Now Bob (member, active cookie set to the workspace) sees the task.
@@ -124,5 +128,80 @@ func TestWorkspaceFlow(t *testing.T) {
 	reqC(t, bob, ts, "POST", "/api/workspaces/switch", tokB, `{"id":""}`)
 	if _, body := reqC(t, bob, ts, "GET", "/api/v1/ready?limit=50", tokB, ""); strings.Contains(body, "Acme task") {
 		t.Fatalf("personal board should not show workspace task: %s", body)
+	}
+}
+
+// TestWorkspaceAdmin covers the admin-management endpoints and their gating.
+func TestWorkspaceAdmin(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, jwksJSON(&priv.PublicKey))
+	}))
+	defer jwks.Close()
+	a, _ := New(context.Background(), Config{JWKSURL: jwks.URL, DataDir: t.TempDir()})
+	defer a.Close()
+	ts := httptest.NewServer(a.Handler)
+	defer ts.Close()
+
+	tokA, tokB := mint(t, priv, "user_1", ""), mint(t, priv, "user_2", "")
+	alice, bob := newClient(), newClient()
+
+	_, body := reqC(t, alice, ts, "POST", "/api/workspaces", tokA, `{"name":"Acme"}`)
+	var ws struct{ ID string }
+	json.Unmarshal([]byte(body), &ws)
+
+	// Invite + accept (bob joins as member).
+	_, body = reqC(t, alice, ts, "POST", "/api/workspaces/"+ws.ID+"/invites", tokA, `{"role":"member"}`)
+	var inv struct{ Token string }
+	json.Unmarshal([]byte(body), &inv)
+	reqC(t, bob, ts, "POST", "/invite/"+inv.Token+"/accept", tokB, "")
+
+	// Members list has two, from the control DB.
+	if code, body := reqC(t, alice, ts, "GET", "/api/workspaces/"+ws.ID+"/members", tokA, ""); code != 200 ||
+		!strings.Contains(body, "user_1") || !strings.Contains(body, "user_2") {
+		t.Fatalf("members = %d %s", code, body)
+	}
+
+	// A member cannot manage: demote/remove others, invite, rename, list invites.
+	for _, c := range []struct{ m, p, b string }{
+		{"PATCH", "/api/workspaces/" + ws.ID + "/members/user_1", `{"role":"member"}`},
+		{"DELETE", "/api/workspaces/" + ws.ID + "/members/user_1", ""},
+		{"POST", "/api/workspaces/" + ws.ID + "/invites", `{"role":"member"}`},
+		{"PATCH", "/api/workspaces/" + ws.ID, `{"name":"x"}`},
+		{"GET", "/api/workspaces/" + ws.ID + "/invites", ""},
+	} {
+		if code, _ := reqC(t, bob, ts, c.m, c.p, tokB, c.b); code != http.StatusForbidden {
+			t.Fatalf("member %s %s = %d, want 403", c.m, c.p, code)
+		}
+	}
+
+	// The sole admin cannot be demoted or removed.
+	if code, _ := reqC(t, alice, ts, "PATCH", "/api/workspaces/"+ws.ID+"/members/user_1", tokA, `{"role":"member"}`); code != http.StatusBadRequest {
+		t.Fatalf("demote last admin = %d, want 400", code)
+	}
+
+	// Admin promotes bob, renames, and creates+revokes an invite.
+	if code, _ := reqC(t, alice, ts, "PATCH", "/api/workspaces/"+ws.ID+"/members/user_2", tokA, `{"role":"admin"}`); code != 200 {
+		t.Fatalf("promote = %d", code)
+	}
+	if code, _ := reqC(t, alice, ts, "PATCH", "/api/workspaces/"+ws.ID, tokA, `{"name":"Acme Inc"}`); code != 200 {
+		t.Fatalf("rename = %d", code)
+	}
+	_, body = reqC(t, alice, ts, "POST", "/api/workspaces/"+ws.ID+"/invites", tokA, `{"email":"z@x.com","role":"member"}`)
+	var inv2 struct{ Token string }
+	json.Unmarshal([]byte(body), &inv2)
+	if code, body := reqC(t, alice, ts, "GET", "/api/workspaces/"+ws.ID+"/invites", tokA, ""); code != 200 || !strings.Contains(body, "z@x.com") {
+		t.Fatalf("list invites = %d %s", code, body)
+	}
+	if code, _ := reqC(t, alice, ts, "DELETE", "/api/workspaces/"+ws.ID+"/invites/"+inv2.Token, tokA, ""); code != 200 {
+		t.Fatalf("revoke invite = %d", code)
+	}
+
+	// Now that bob is an admin, alice (still admin) can be removed and it holds.
+	if code, _ := reqC(t, bob, ts, "DELETE", "/api/workspaces/"+ws.ID+"/members/user_1", tokB, ""); code != 200 {
+		t.Fatalf("remove co-admin = %d", code)
+	}
+	if _, body := reqC(t, alice, ts, "GET", "/api/workspaces", tokA, ""); strings.Contains(body, ws.ID) {
+		t.Fatalf("removed admin still lists the workspace: %s", body)
 	}
 }

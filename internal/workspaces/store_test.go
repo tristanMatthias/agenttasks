@@ -3,6 +3,7 @@ package workspaces
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func openTest(t *testing.T) *Store {
@@ -102,6 +103,71 @@ func TestRolesAndRemoval(t *testing.T) {
 	}
 	if _, ok := s.Role("ws_1", "user_2"); ok {
 		t.Fatal("removed member still has a role")
+	}
+}
+
+// The only admin can't be demoted or removed (guarded atomically in the store),
+// but once a second admin exists the first can go.
+func TestLastAdminGuard(t *testing.T) {
+	s := openTest(t)
+	_ = s.CreateWorkspace(Workspace{ID: "ws_1", Name: "A", Slug: "a", Prefix: "a", CreatedBy: "u1"}, "", "")
+
+	if err := s.UpdateMemberRole("ws_1", "u1", RoleMember); err != ErrLastAdmin {
+		t.Fatalf("demote last admin = %v, want ErrLastAdmin", err)
+	}
+	if err := s.RemoveMember("ws_1", "u1"); err != ErrLastAdmin {
+		t.Fatalf("remove last admin = %v, want ErrLastAdmin", err)
+	}
+
+	_ = s.CreateInvite(Invite{Token: "t", WorkspaceID: "ws_1", Role: RoleAdmin})
+	if _, err := s.AcceptInvite("t", "u2", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveMember("ws_1", "u1"); err != nil {
+		t.Fatalf("remove admin with a spare = %v, want nil", err)
+	}
+	if n, _ := s.CountAdmins("ws_1"); n != 1 {
+		t.Fatalf("admins after removal = %d, want 1", n)
+	}
+}
+
+// An expired invite is rejected and not listed as pending.
+func TestExpiredInvite(t *testing.T) {
+	s := openTest(t)
+	_ = s.CreateWorkspace(Workspace{ID: "ws_1", Name: "A", Slug: "a", Prefix: "a", CreatedBy: "u1"}, "", "")
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	_ = s.CreateInvite(Invite{Token: "t", WorkspaceID: "ws_1", Role: RoleMember, ExpiresAt: past})
+
+	if _, err := s.AcceptInvite("t", "u2", "", ""); err != ErrInviteExpired {
+		t.Fatalf("expired accept = %v, want ErrInviteExpired", err)
+	}
+	if p, _ := s.PendingInvites("ws_1"); len(p) != 0 {
+		t.Fatalf("expired invite still pending: %d", len(p))
+	}
+}
+
+// An email-restricted invite is rejected when the accepter has NO email (can't
+// prove they match) — no silent bypass.
+func TestRestrictedInviteNoEmailRejected(t *testing.T) {
+	s := openTest(t)
+	_ = s.CreateWorkspace(Workspace{ID: "ws_1", Name: "A", Slug: "a", Prefix: "a", CreatedBy: "u1"}, "", "")
+	_ = s.CreateInvite(Invite{Token: "t", WorkspaceID: "ws_1", Role: RoleMember, Email: "wanted@x.com"})
+	if _, err := s.AcceptInvite("t", "u2", "", "Nobody"); err != ErrInviteEmail {
+		t.Fatalf("restricted accept with no email = %v, want ErrInviteEmail", err)
+	}
+}
+
+// Accepting as an already-member keeps the existing (higher) role and burns the invite.
+func TestAcceptAsExistingMember(t *testing.T) {
+	s := openTest(t)
+	_ = s.CreateWorkspace(Workspace{ID: "ws_1", Name: "A", Slug: "a", Prefix: "a", CreatedBy: "u1"}, "", "")
+	_ = s.CreateInvite(Invite{Token: "t", WorkspaceID: "ws_1", Role: RoleMember})
+	wsID, err := s.AcceptInvite("t", "u1", "", "") // u1 is already admin
+	if err != nil || wsID != "ws_1" {
+		t.Fatalf("accept as member = %v %q", err, wsID)
+	}
+	if r, _ := s.Role("ws_1", "u1"); r != RoleAdmin {
+		t.Fatalf("existing role changed to %q, want admin", r)
 	}
 }
 

@@ -4,11 +4,18 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"html/template"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/tristanMatthias/tasks/pkg/httpapi"
 )
+
+// inviteTTL is how long a shareable invite link stays valid.
+const inviteTTL = 7 * 24 * time.Hour
 
 // API serves the control-plane workspace endpoints (list/create/switch, members,
 // invites). Authentication reuses the tasks Authenticator: it identifies the
@@ -35,7 +42,8 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/workspaces/{id}/invites/{token}", a.revokeInvite)
 	mux.HandleFunc("PATCH /api/workspaces/{id}", a.rename)
 	mux.HandleFunc("DELETE /api/workspaces/{id}", a.deleteWS)
-	mux.HandleFunc("GET /invite/{token}", a.acceptLink)
+	mux.HandleFunc("GET /invite/{token}", a.inviteLanding)
+	mux.HandleFunc("POST /invite/{token}/accept", a.acceptInvite)
 }
 
 type principal struct{ sub, email, name string }
@@ -108,7 +116,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		serverErr(w, err)
 		return
 	}
-	SetActiveCookie(w, ws.ID)
+	SetActiveCookie(w, r, ws.ID)
 	writeJSON(w, http.StatusCreated, wsView{ID: ws.ID, Name: ws.Name, Prefix: ws.Prefix, Role: RoleAdmin})
 }
 
@@ -132,7 +140,7 @@ func (a *API) switchWS(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		target = PersonalID(p.sub)
 	}
-	SetActiveCookie(w, target)
+	SetActiveCookie(w, r, target)
 	writeJSON(w, http.StatusOK, map[string]any{"active": target})
 }
 
@@ -177,16 +185,11 @@ func (a *API) updateMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid role")
 		return
 	}
-	// Don't demote the last admin.
-	if body.Role == RoleMember {
-		if cur, _ := a.store.Role(wsID, userID); cur == RoleAdmin {
-			if n, _ := a.store.CountAdmins(wsID); n <= 1 {
-				writeErr(w, http.StatusBadRequest, "workspace needs an admin")
-				return
-			}
-		}
-	}
 	if err := a.store.UpdateMemberRole(wsID, userID, body.Role); err != nil {
+		if errors.Is(err, ErrLastAdmin) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		serverErr(w, err)
 		return
 	}
@@ -205,18 +208,16 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "admin only")
 		return
 	}
-	if cur, _ := a.store.Role(wsID, userID); cur == RoleAdmin {
-		if n, _ := a.store.CountAdmins(wsID); n <= 1 {
-			writeErr(w, http.StatusBadRequest, "workspace needs an admin")
+	if err := a.store.RemoveMember(wsID, userID); err != nil {
+		if errors.Is(err, ErrLastAdmin) {
+			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-	}
-	if err := a.store.RemoveMember(wsID, userID); err != nil {
 		serverErr(w, err)
 		return
 	}
 	if userID == p.sub {
-		SetActiveCookie(w, PersonalID(p.sub)) // left → back to personal
+		SetActiveCookie(w, r, PersonalID(p.sub)) // left → back to personal
 	}
 	ok200(w)
 }
@@ -266,7 +267,12 @@ func (a *API) createInvite(w http.ResponseWriter, r *http.Request) {
 	if role != RoleAdmin {
 		role = RoleMember
 	}
-	inv := Invite{Token: randID("", 16), WorkspaceID: wsID, Role: role, Email: strings.TrimSpace(body.Email), CreatedBy: p.sub}
+	inv := Invite{
+		Token: randID("", 16), WorkspaceID: wsID, Role: role,
+		Email:     strings.TrimSpace(body.Email),
+		CreatedBy: p.sub,
+		ExpiresAt: time.Now().UTC().Add(inviteTTL).Format(time.RFC3339Nano),
+	}
 	if err := a.store.CreateInvite(inv); err != nil {
 		serverErr(w, err)
 		return
@@ -335,17 +341,42 @@ func (a *API) deleteWS(w http.ResponseWriter, r *http.Request) {
 		serverErr(w, err)
 		return
 	}
-	SetActiveCookie(w, PersonalID(p.sub))
+	SetActiveCookie(w, r, PersonalID(p.sub))
 	ok200(w)
 }
 
-// acceptLink handles a shared invite link: a logged-in visitor joins the
-// workspace and lands on it; a logged-out visitor is sent to sign in first.
-func (a *API) acceptLink(w http.ResponseWriter, r *http.Request) {
+// inviteLanding (GET) shows a confirmation page for a shared invite link. It
+// never mutates — joining happens on an explicit same-origin POST — so a
+// cross-site request (an <img> or link to the URL) can't silently add the
+// victim to a workspace (CSRF). A logged-out visitor is sent to sign in first.
+func (a *API) inviteLanding(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	if _, ok := a.who(r); !ok {
+		http.Redirect(w, r, "/sign-in?redirect_url="+url.QueryEscape("/invite/"+token), http.StatusFound)
+		return
+	}
+	inv, err := a.store.Invite(token)
+	if err != nil || inv.AcceptedAt != "" || (inv.ExpiresAt != "" && now() > inv.ExpiresAt) {
+		http.Redirect(w, r, "/?invite=invalid", http.StatusFound)
+		return
+	}
+	ws, err := a.store.Workspace(inv.WorkspaceID)
+	if err != nil {
+		http.Redirect(w, r, "/?invite=invalid", http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = inviteConfirmTmpl.Execute(w, map[string]string{"Token": token, "Name": ws.Name})
+}
+
+// acceptInvite (POST) performs the join. It's same-origin + cookie-authed; the
+// Lax session cookie isn't sent on a cross-site POST, so CSRF can't reach it.
+func (a *API) acceptInvite(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	p, ok := a.who(r)
 	if !ok {
-		http.Redirect(w, r, "/sign-in?redirect_url="+urlEscape("/invite/"+token), http.StatusFound)
+		unauthorized(w)
 		return
 	}
 	wsID, err := a.store.AcceptInvite(token, p.sub, p.email, p.name)
@@ -353,9 +384,32 @@ func (a *API) acceptLink(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?invite=error", http.StatusFound)
 		return
 	}
-	SetActiveCookie(w, wsID)
+	SetActiveCookie(w, r, wsID)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
+
+// A minimal, dependency-free confirm page (the board's own styling isn't
+// available at this layer). {{.Name}} is auto-escaped by html/template.
+var inviteConfirmTmpl = template.Must(template.New("invite").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Join workspace</title>
+<style>
+  :root{color-scheme:light dark}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f1115;color:#c0caf5}
+  .card{max-width:360px;padding:28px;border:1px solid #2a2f3d;border-radius:14px;background:#161922;text-align:center}
+  h1{font-size:18px;margin:0 0 6px} p{color:#8b93a7;font-size:14px;margin:0 0 20px}
+  .name{color:#c0caf5;font-weight:600}
+  button{width:100%;padding:10px;border:0;border-radius:8px;background:#7aa2f7;color:#0f1115;font-weight:600;font-size:14px;cursor:pointer}
+  a{display:inline-block;margin-top:12px;color:#8b93a7;font-size:13px;text-decoration:none}
+</style></head>
+<body><div class="card">
+  <h1>Join workspace</h1>
+  <p>You've been invited to join <span class="name">{{.Name}}</span>.</p>
+  <form method="post" action="/invite/{{.Token}}/accept"><button type="submit">Join workspace</button></form>
+  <a href="/">Not now</a>
+</div></body></html>`))
 
 // ---- helpers ----
 
@@ -405,11 +459,6 @@ func slugify(s string) string {
 		out = strings.TrimRight(out[:maxLen], "-")
 	}
 	return out
-}
-
-func urlEscape(s string) string {
-	// Minimal escape for a same-site path in a query value.
-	return strings.NewReplacer("&", "%26", "#", "%23", "?", "%3F", " ", "%20").Replace(s)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
