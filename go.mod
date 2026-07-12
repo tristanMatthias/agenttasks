@@ -5,7 +5,8 @@ go 1.25.1
 require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/tristanMatthias/tasks v0.0.0-20260712073739-3d469d5bce60
+	github.com/tristanMatthias/tasks v0.0.0-20260712080815-1e52b8bf9920
+	modernc.org/sqlite v1.53.0
 )
 
 require (
@@ -27,5 +28,4 @@ require (
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.53.0 // indirect
 )
