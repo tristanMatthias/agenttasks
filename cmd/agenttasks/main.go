@@ -44,6 +44,8 @@ func main() {
 		JWKSURL:        jwks,
 		Issuer:         os.Getenv("AGENTTASKS_ISSUER"),
 		OrgClaim:       os.Getenv("AGENTTASKS_ORG_CLAIM"),
+		SlugClaim:      os.Getenv("AGENTTASKS_SLUG_CLAIM"),
+		RoleClaim:      os.Getenv("AGENTTASKS_ROLE_CLAIM"),
 		DataDir:        dataDir,
 		Prefix:         env("AGENTTASKS_PREFIX", "t"),
 		PublishableKey: env("AGENTTASKS_CLERK_PUBLISHABLE_KEY", os.Getenv("CLERK_PUBLISHABLE_KEY")),

@@ -21,6 +21,8 @@ type Config struct {
 	JWKSURL    string // JWKS endpoint (e.g. Clerk's .well-known/jwks.json)
 	Issuer     string // optional expected "iss"
 	OrgClaim   string // claim holding the tenant id (default "org_id")
+	SlugClaim  string // claim holding the org slug (default "org_slug")
+	RoleClaim  string // claim holding the org role (default "org_role")
 	CookieName string // session cookie to read (default "__session")
 	// RequireOrg rejects tokens without an org claim (multi-tenant). When false,
 	// a token without an org resolves to a per-user tenant (Subject).
@@ -32,6 +34,8 @@ type Authenticator struct {
 	kf         keyfunc.Keyfunc
 	issuer     string
 	orgClaim   string
+	slugClaim  string
+	roleClaim  string
 	cookie     string
 	requireOrg bool
 }
@@ -49,11 +53,22 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 	if orgClaim == "" {
 		orgClaim = "org_id"
 	}
+	slugClaim := cfg.SlugClaim
+	if slugClaim == "" {
+		slugClaim = "org_slug"
+	}
+	roleClaim := cfg.RoleClaim
+	if roleClaim == "" {
+		roleClaim = "org_role"
+	}
 	cookie := cfg.CookieName
 	if cookie == "" {
 		cookie = "__session"
 	}
-	return &Authenticator{kf: kf, issuer: cfg.Issuer, orgClaim: orgClaim, cookie: cookie, requireOrg: cfg.RequireOrg}, nil
+	return &Authenticator{
+		kf: kf, issuer: cfg.Issuer, orgClaim: orgClaim, slugClaim: slugClaim,
+		roleClaim: roleClaim, cookie: cookie, requireOrg: cfg.RequireOrg,
+	}, nil
 }
 
 // Authorize verifies the token and returns the tenant identity. The tenant id
@@ -93,7 +108,16 @@ func (a *Authenticator) Authorize(r *http.Request) (httpapi.Identity, bool) {
 	if org == "" {
 		return httpapi.Identity{}, false
 	}
-	return httpapi.Identity{Subject: sub, Claims: map[string]string{"org": org}}, true
+	// Slug seeds a new workspace's task-id prefix; role gates admin UI. Both are
+	// present only when an org is active and the session token carries them.
+	out := map[string]string{"org": org}
+	if slug, _ := claims[a.slugClaim].(string); slug != "" {
+		out["org_slug"] = slug
+	}
+	if role, _ := claims[a.roleClaim].(string); role != "" {
+		out["org_role"] = role
+	}
+	return httpapi.Identity{Subject: sub, Claims: out}, true
 }
 
 func bearer(r *http.Request) string {

@@ -22,6 +22,8 @@ type Config struct {
 	JWKSURL        string
 	Issuer         string
 	OrgClaim       string
+	SlugClaim      string
+	RoleClaim      string
 	DataDir        string
 	Prefix         string
 	PublishableKey string // Clerk pk_live_/pk_test_ for the sign-in page
@@ -52,7 +54,13 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 	authn := cfg.Auth
 	if authn == nil {
-		a, err := oidc.New(ctx, oidc.Config{JWKSURL: cfg.JWKSURL, Issuer: cfg.Issuer, OrgClaim: cfg.OrgClaim})
+		a, err := oidc.New(ctx, oidc.Config{
+			JWKSURL:   cfg.JWKSURL,
+			Issuer:    cfg.Issuer,
+			OrgClaim:  cfg.OrgClaim,
+			SlugClaim: cfg.SlugClaim,
+			RoleClaim: cfg.RoleClaim,
+		})
 		if err != nil {
 			return nil, err
 		}
