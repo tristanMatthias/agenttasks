@@ -5,7 +5,7 @@ go 1.25.1
 require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/tristanMatthias/tasks v0.0.0-20260712023038-8627ec5580c6
+	github.com/tristanMatthias/tasks v0.0.0-20260712062119-b30b69f9aaed
 )
 
 require (
