@@ -81,17 +81,19 @@ window.addEventListener("load", async () => {
 // clerkBootHead returns a <head> snippet (for httpapi.Config.InjectHead) that
 // loads ClerkJS on the board itself. ClerkJS keeps Clerk's short-lived __session
 // cookie refreshed in the background, so authenticated API calls don't 401 after
-// the cookie's ~60s TTL. It exposes window.__authReady, a promise the board awaits
-// before its first fetch: it resolves once the session is fresh, or redirects an
-// unauthenticated visitor to /sign-in (preserving the deep link).
+// the cookie's ~60s TTL. It exposes window.__authReady, a promise the app awaits
+// before deciding what to show: it resolves once ClerkJS has loaded and (for a
+// signed-in user) refreshed the session cookie. A logged-out visitor is NOT
+// bounced — the SPA renders the public landing page, whose Log in button sends
+// them to /sign-in (preserving the current path as the redirect target).
 func clerkBootHead(pk, frontendAPI string) string {
 	return `<script async crossorigin data-clerk-publishable-key="` + pk + `" ` +
 		`src="https://` + frontendAPI + `/npm/@clerk/clerk-js@5/dist/clerk.browser.js"></script>` +
 		`<script>window.__authReady=new Promise(function(resolve){function boot(){` +
 		`if(!window.Clerk){setTimeout(boot,50);return;}` +
 		`window.Clerk.load().then(async function(){` +
-		`if(!window.Clerk.user){location.href="/sign-in?redirect_url="+encodeURIComponent(location.pathname+location.search+location.hash);return;}` +
-		`try{await window.Clerk.session.getToken();}catch(e){}resolve();` +
+		`if(window.Clerk.user){try{await window.Clerk.session.getToken();}catch(e){}}` +
+		`resolve();` +
 		`}).catch(function(){resolve();});}boot();});</script>`
 }
 
