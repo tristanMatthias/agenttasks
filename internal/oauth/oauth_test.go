@@ -26,6 +26,13 @@ func testProvider(t *testing.T) (*httptest.Server, *[]string) {
 			org := r.Header.Get("X-Test-Org")
 			return org, org != ""
 		},
+		Workspaces: func(r *http.Request) []Workspace {
+			org := r.Header.Get("X-Test-Org")
+			if org == "" {
+				return nil
+			}
+			return []Workspace{{ID: org, Name: "Acme"}, {ID: "org_OTHER", Name: "Other"}}
+		},
 		Mint: func(org string) (string, error) {
 			tok := "tasks_" + org + "_secretmaterial"
 			*minted = append(*minted, org)
@@ -147,6 +154,51 @@ func TestFullAuthCodeFlow(t *testing.T) {
 		"redirect_uri": {"https://claude.ai/callback"}, "client_id": {clientID}, "code_verifier": {verifier},
 	}); again != http.StatusBadRequest {
 		t.Fatalf("reused code should fail, got %d", again)
+	}
+}
+
+// The consent picker: a workspace the user belongs to is honored; a forged one
+// falls back to the session's active workspace (never trust the form).
+func TestConsentWorkspacePicker(t *testing.T) {
+	ts, minted := testProvider(t)
+	c := client()
+	clientID := register(t, ts.URL, `{"redirect_uris":["https://claude.ai/callback"],"client_name":"Claude"}`)
+	verifier := "a-high-entropy-code-verifier-1234567890-abcdefghij"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+
+	run := func(chosen string) {
+		authURL := ts.URL + "/oauth/authorize?" + url.Values{
+			"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {"https://claude.ai/callback"},
+			"code_challenge": {challenge}, "code_challenge_method": {"S256"}, "resource": {"https://tasks.test/mcp"},
+		}.Encode()
+		req, _ := http.NewRequest("GET", authURL, nil)
+		req.Header.Set("X-Test-Org", "org_ACME")
+		resp, _ := c.Do(req)
+		body := readAll(resp)
+		if !strings.Contains(body, "org_OTHER") || !strings.Contains(body, ">Other<") {
+			t.Fatalf("consent picker missing options: %s", body)
+		}
+		reqTok := regexp.MustCompile(`name="req" value="([^"]+)"`).FindStringSubmatch(body)[1]
+		form := url.Values{"req": {reqTok}, "decision": {"allow"}, "workspace": {chosen}}
+		preq, _ := http.NewRequest("POST", ts.URL+"/oauth/authorize", strings.NewReader(form.Encode()))
+		preq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		preq.Header.Set("X-Test-Org", "org_ACME")
+		resp, _ = c.Do(preq)
+		u, _ := url.Parse(resp.Header.Get("Location"))
+		tokenExchange(t, ts.URL, url.Values{
+			"grant_type": {"authorization_code"}, "code": {u.Query().Get("code")},
+			"redirect_uri": {"https://claude.ai/callback"}, "client_id": {clientID}, "code_verifier": {verifier},
+		})
+	}
+
+	run("org_OTHER")
+	if last := (*minted)[len(*minted)-1]; last != "org_OTHER" {
+		t.Fatalf("chosen workspace not honored: minted %v", *minted)
+	}
+	run("org_FORGED")
+	if last := (*minted)[len(*minted)-1]; last != "org_ACME" {
+		t.Fatalf("forged workspace not rejected (want fallback to active): minted %v", *minted)
 	}
 }
 

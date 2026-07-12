@@ -112,9 +112,21 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 				if !ok {
 					return "", false
 				}
-				// Grant the connector access to the human's ACTIVE workspace.
+				// Default the picker to the human's ACTIVE workspace.
 				wsID, _ := wsStore.Active(id.Subject, r)
 				return wsID, true
+			},
+			Workspaces: func(r *http.Request) []oauth.Workspace {
+				id, ok := jwtAuth.Authorize(r)
+				if !ok {
+					return nil
+				}
+				out := []oauth.Workspace{{ID: workspaces.PersonalID(id.Subject), Name: "Personal"}}
+				mine, _ := wsStore.WorkspacesForUser(id.Subject)
+				for _, w := range mine {
+					out = append(out, oauth.Workspace{ID: w.ID, Name: w.Name})
+				}
+				return out
 			},
 			Mint: func(workspaceID string) (string, error) {
 				c, err := mgr.CoreFor(workspaceID)

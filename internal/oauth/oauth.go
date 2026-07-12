@@ -38,11 +38,22 @@ type Config struct {
 	SignInURL string // where to send an unauthenticated user (e.g. /sign-in)
 	HMACKey   []byte // signs client_ids, request blobs, and codes
 	Logger    *slog.Logger
-	// AuthUser resolves the human's tenant (org) from their session (Clerk cookie).
-	// ok=false means "not signed in" -> the user is sent to SignInURL.
+	// AuthUser resolves the human's default tenant (their active workspace) from
+	// their session. ok=false means "not signed in" -> sent to SignInURL.
 	AuthUser func(r *http.Request) (org string, ok bool)
+	// Workspaces lists the workspaces the signed-in user may grant access to
+	// (personal + orgs). Used to render the consent picker AND to validate the
+	// chosen workspace on submit — a client can't be granted one the user isn't
+	// in. Optional: nil disables the picker (falls back to the active workspace).
+	Workspaces func(r *http.Request) []Workspace
 	// Mint returns a fresh access token (a tenant-scoped API key) for org.
 	Mint func(org string) (token string, err error)
+}
+
+// Workspace is one selectable board on the consent screen.
+type Workspace struct {
+	ID   string
+	Name string
 }
 
 // Provider is the authorization server.
@@ -196,8 +207,12 @@ func (p *Provider) authorize(w http.ResponseWriter, r *http.Request) {
 		Resource:    q.Get("resource"),
 		Exp:         time.Now().Add(10 * time.Minute).Unix(),
 	}
+	var options []Workspace
+	if p.cfg.Workspaces != nil {
+		options = p.cfg.Workspaces(r)
+	}
 	blob, _ := json.Marshal(req)
-	p.renderConsent(w, cm.Name, org, p.sign(blob))
+	p.renderConsent(w, cm.Name, org, options, p.sign(blob))
 }
 
 func (p *Provider) consent(w http.ResponseWriter, r *http.Request) {
@@ -215,12 +230,23 @@ func (p *Provider) consent(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "request expired — start again")
 		return
 	}
-	// Re-confirm the human is still signed in; the org comes from the session.
+	// Re-confirm the human is still signed in; the default org comes from the
+	// session (their active workspace).
 	org, signedIn := p.cfg.AuthUser(r)
 	if !signedIn {
 		back := "/oauth/authorize?" + authQuery(req)
 		http.Redirect(w, r, p.cfg.SignInURL+"?redirect_url="+url.QueryEscape(back), http.StatusFound)
 		return
+	}
+	// Honor the picked workspace, but ONLY if it's one the user actually belongs
+	// to (never trust the form) — otherwise keep the session's active workspace.
+	if chosen := r.Form.Get("workspace"); chosen != "" && chosen != org && p.cfg.Workspaces != nil {
+		for _, ws := range p.cfg.Workspaces(r) {
+			if ws.ID == chosen {
+				org = chosen
+				break
+			}
+		}
 	}
 	if r.Form.Get("decision") != "allow" {
 		redirectErr(w, r, req.RedirectURI, "access_denied", req.State)
@@ -344,6 +370,13 @@ func (p *Provider) clientFromID(id string) (clientMeta, bool) {
 	return cm, true
 }
 
+type consentData struct {
+	Client     string
+	Default    string
+	Req        string
+	Workspaces []Workspace
+}
+
 var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Connect — agenttasks</title>
@@ -353,13 +386,21 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
  .card{width:min(420px,92vw);background:#1a1b26;border:1px solid #2a2b3c;border-radius:12px;padding:26px 24px;box-shadow:0 18px 60px rgba(0,0,0,.5)}
  h1{font-size:18px;margin:0 0 6px} p{color:#a9b1d6;font-size:13.5px;line-height:1.5}
  .org{color:#7aa2f7;font-weight:600} .row{display:flex;gap:10px;margin-top:18px}
+ label{display:block;margin:16px 0 6px;font-size:12px;font-weight:600;color:#8b93a7;text-transform:uppercase;letter-spacing:.04em}
+ select{width:100%;padding:10px;border-radius:8px;border:1px solid #2a2b3c;background:#0f1115;color:#c0caf5;font-size:14px}
  button{flex:1;padding:11px;border-radius:8px;border:1px solid #2a2b3c;font-weight:600;font-size:14px;cursor:pointer}
  .allow{background:#7aa2f7;color:#0b0b12;border-color:#7aa2f7} .deny{background:transparent;color:#c0caf5}
 </style></head><body>
 <form class="card" method="POST" action="/oauth/authorize">
  <h1>Connect {{.Client}}</h1>
- <p><strong>{{.Client}}</strong> is requesting access to your <span class="org">agenttasks</span> board
-    (tenant <span class="org">{{.Org}}</span>). It will be able to read and manage your tasks.</p>
+ <p><strong>{{.Client}}</strong> is requesting access to your <span class="org">agenttasks</span> board.
+    It will be able to read and manage tasks in the selected workspace.</p>
+ {{if .Workspaces}}
+ <label for="ws">Workspace</label>
+ <select id="ws" name="workspace">
+   {{range .Workspaces}}<option value="{{.ID}}"{{if eq .ID $.Default}} selected{{end}}>{{.Name}}</option>{{end}}
+ </select>
+ {{end}}
  <input type="hidden" name="req" value="{{.Req}}"/>
  <div class="row">
    <button class="deny" name="decision" value="deny" type="submit">Deny</button>
@@ -367,13 +408,13 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
  </div>
 </form></body></html>`))
 
-func (p *Provider) renderConsent(w http.ResponseWriter, client, org, req string) {
+func (p *Provider) renderConsent(w http.ResponseWriter, client, def string, options []Workspace, req string) {
 	if client == "" {
 		client = "An application"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = consentTmpl.Execute(w, map[string]string{"Client": client, "Org": org, "Req": req})
+	_ = consentTmpl.Execute(w, consentData{Client: client, Default: def, Req: req, Workspaces: options})
 }
 
 func authQuery(req authReq) string {
