@@ -8,10 +8,12 @@ import (
 	"crypto/rand"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 
 	"github.com/tristanMatthias/agenttasks/internal/oauth"
 	"github.com/tristanMatthias/agenttasks/internal/oidc"
 	"github.com/tristanMatthias/agenttasks/internal/tenant"
+	"github.com/tristanMatthias/agenttasks/internal/workspaces"
 	"github.com/tristanMatthias/tasks/pkg/httpapi"
 	"github.com/tristanMatthias/tasks/pkg/mcpsrv"
 	"github.com/tristanMatthias/tasks/web"
@@ -21,9 +23,8 @@ import (
 type Config struct {
 	JWKSURL        string
 	Issuer         string
-	OrgClaim       string
-	SlugClaim      string
-	RoleClaim      string
+	EmailClaim     string // JWT claim holding the user's email (default "email")
+	NameClaim      string // JWT claim holding the user's display name (default "name")
 	DataDir        string
 	Prefix         string
 	PublishableKey string // Clerk pk_live_/pk_test_ for the sign-in page
@@ -45,6 +46,7 @@ type Config struct {
 type App struct {
 	Handler http.Handler
 	Tenants *tenant.Manager
+	ws      *workspaces.Store
 }
 
 // New builds the control plane.
@@ -55,21 +57,29 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	authn := cfg.Auth
 	if authn == nil {
 		a, err := oidc.New(ctx, oidc.Config{
-			JWKSURL:   cfg.JWKSURL,
-			Issuer:    cfg.Issuer,
-			OrgClaim:  cfg.OrgClaim,
-			SlugClaim: cfg.SlugClaim,
-			RoleClaim: cfg.RoleClaim,
+			JWKSURL:    cfg.JWKSURL,
+			Issuer:     cfg.Issuer,
+			EmailClaim: cfg.EmailClaim,
+			NameClaim:  cfg.NameClaim,
 		})
 		if err != nil {
 			return nil, err
 		}
 		authn = a
 	}
-	jwtAuth := authn // the identity-provider authenticator (reads the Clerk session)
-	mgr := tenant.New(tenant.Options{Dir: cfg.DataDir, Prefix: cfg.Prefix, OnChange: cfg.OnTenantChange})
-	// Accept per-tenant API keys (tasks_<org>_<secret>) in front of JWT sessions.
-	authn = composite{jwt: authn, tenants: mgr}
+	jwtAuth := authn // the identity-provider authenticator (reads the user's session)
+
+	// The control store owns workspaces / members / invites (our self-hosted
+	// replacement for Clerk Organizations). The tenant resolver uses it to route
+	// a human to their active workspace after checking membership.
+	wsStore, err := workspaces.Open(filepath.Join(cfg.DataDir, "control.db"))
+	if err != nil {
+		return nil, err
+	}
+	mgr := tenant.New(tenant.Options{Dir: cfg.DataDir, Prefix: cfg.Prefix, OnChange: cfg.OnTenantChange, Workspaces: wsStore})
+	// Accept per-workspace API keys (tasks_<workspace>_<secret>) in front of sessions.
+	authn = composite{jwt: jwtAuth, tenants: mgr}
+	wsAPI := workspaces.NewAPI(wsStore, authn)
 	burst := int(cfg.RateLimit) * 2
 	if burst < 40 {
 		burst = 40
@@ -99,13 +109,15 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			Logger:    cfg.Logger,
 			AuthUser: func(r *http.Request) (string, bool) {
 				id, ok := jwtAuth.Authorize(r)
-				if !ok || id.Claims["org"] == "" {
+				if !ok {
 					return "", false
 				}
-				return id.Claims["org"], true
+				// Grant the connector access to the human's ACTIVE workspace.
+				wsID, _ := wsStore.Active(id.Subject, r)
+				return wsID, true
 			},
-			Mint: func(org string) (string, error) {
-				c, err := mgr.CoreFor(org)
+			Mint: func(workspaceID string) (string, error) {
+				c, err := mgr.CoreFor(workspaceID)
 				if err != nil {
 					return "", err
 				}
@@ -141,23 +153,28 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		Metrics:             true,
 	})
 
-	// Front the tasks handler with public host endpoints (sign-in page + OAuth AS).
-	handler := http.Handler(srv.Handler())
-	if cfg.PublishableKey != "" || oauthProv != nil {
-		mux := http.NewServeMux()
-		if cfg.PublishableKey != "" {
-			sign := signInHandler(cfg.PublishableKey, frontendAPIFromPublishableKey(cfg.PublishableKey))
-			mux.HandleFunc("GET /sign-in", sign)
-			mux.HandleFunc("GET /sign-up", sign)
-		}
-		if oauthProv != nil {
-			oauthProv.Register(mux)
-		}
-		mux.Handle("/", srv.Handler())
-		handler = mux
+	// Front the tasks handler with the control-plane endpoints: the workspace API
+	// + invite links (always), plus the sign-in page and OAuth AS when Clerk is
+	// configured. Everything else falls through to the tasks handler.
+	mux := http.NewServeMux()
+	wsAPI.Register(mux)
+	if cfg.PublishableKey != "" {
+		sign := signInHandler(cfg.PublishableKey, frontendAPIFromPublishableKey(cfg.PublishableKey))
+		mux.HandleFunc("GET /sign-in", sign)
+		mux.HandleFunc("GET /sign-up", sign)
 	}
-	return &App{Handler: handler, Tenants: mgr}, nil
+	if oauthProv != nil {
+		oauthProv.Register(mux)
+	}
+	mux.Handle("/", srv.Handler())
+
+	return &App{Handler: mux, Tenants: mgr, ws: wsStore}, nil
 }
 
-// Close releases all tenant resources.
-func (a *App) Close() { a.Tenants.Close() }
+// Close releases all tenant + control-store resources.
+func (a *App) Close() {
+	a.Tenants.Close()
+	if a.ws != nil {
+		a.ws.Close()
+	}
+}

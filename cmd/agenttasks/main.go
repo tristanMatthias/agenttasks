@@ -22,7 +22,8 @@ func main() {
 	slog.SetDefault(logger)
 
 	jwks := env("AGENTTASKS_JWKS_URL", env("CLERK_JWKS_URL", ""))
-	if jwks == "" {
+	devToken := os.Getenv("AGENTTASKS_DEV_TOKEN") // local dev only: fixed-token auth, no IdP
+	if jwks == "" && devToken == "" {
 		logger.Error("AGENTTASKS_JWKS_URL (or CLERK_JWKS_URL) is required")
 		os.Exit(1)
 	}
@@ -40,12 +41,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	a, err := app.New(ctx, app.Config{
+	cfg := app.Config{
 		JWKSURL:        jwks,
 		Issuer:         os.Getenv("AGENTTASKS_ISSUER"),
-		OrgClaim:       os.Getenv("AGENTTASKS_ORG_CLAIM"),
-		SlugClaim:      os.Getenv("AGENTTASKS_SLUG_CLAIM"),
-		RoleClaim:      os.Getenv("AGENTTASKS_ROLE_CLAIM"),
+		EmailClaim:     os.Getenv("AGENTTASKS_EMAIL_CLAIM"),
+		NameClaim:      os.Getenv("AGENTTASKS_NAME_CLAIM"),
 		DataDir:        dataDir,
 		Prefix:         env("AGENTTASKS_PREFIX", "t"),
 		PublishableKey: env("AGENTTASKS_CLERK_PUBLISHABLE_KEY", os.Getenv("CLERK_PUBLISHABLE_KEY")),
@@ -55,7 +55,12 @@ func main() {
 		BehindProxy:    os.Getenv("AGENTTASKS_BEHIND_PROXY") == "true",
 		RateLimit:      20,
 		Logger:         logger,
-	})
+	}
+	if devToken != "" {
+		cfg.Auth = app.DevAuth{Token: devToken}
+		logger.Warn("AGENTTASKS_DEV_TOKEN set — using fixed-token dev auth (NOT for production)")
+	}
+	a, err := app.New(ctx, cfg)
 	if err != nil {
 		logger.Error("startup", "err", err)
 		os.Exit(1)

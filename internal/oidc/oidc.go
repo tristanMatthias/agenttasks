@@ -1,8 +1,12 @@
 // Package oidc provides a JWT-via-JWKS Authenticator that plugs into
 // tasks/pkg/httpapi. It verifies a session token (from an Authorization: Bearer
-// header or a session cookie) against a JWKS endpoint and extracts the tenant
-// (organization) id from a configurable claim. Clerk is just a specific JWKS
-// issuer + org claim; nothing here is Clerk-specific.
+// header or a session cookie) against a JWKS endpoint and extracts the user's
+// identity (subject + optional email/name). Clerk is just a specific JWKS
+// issuer; nothing here is Clerk-specific.
+//
+// Workspace/tenant selection is NOT done here — the control plane maps a user to
+// their workspaces itself (see internal/workspaces). This authenticator only
+// answers "who is this request?".
 package oidc
 
 import (
@@ -20,24 +24,18 @@ import (
 type Config struct {
 	JWKSURL    string // JWKS endpoint (e.g. Clerk's .well-known/jwks.json)
 	Issuer     string // optional expected "iss"
-	OrgClaim   string // claim holding the tenant id (default "org_id")
-	SlugClaim  string // claim holding the org slug (default "org_slug")
-	RoleClaim  string // claim holding the org role (default "org_role")
+	EmailClaim string // claim holding the user's email (default "email")
+	NameClaim  string // claim holding the user's display name (default "name")
 	CookieName string // session cookie to read (default "__session")
-	// RequireOrg rejects tokens without an org claim (multi-tenant). When false,
-	// a token without an org resolves to a per-user tenant (Subject).
-	RequireOrg bool
 }
 
 // Authenticator implements httpapi.Authenticator.
 type Authenticator struct {
 	kf         keyfunc.Keyfunc
 	issuer     string
-	orgClaim   string
-	slugClaim  string
-	roleClaim  string
+	emailClaim string
+	nameClaim  string
 	cookie     string
-	requireOrg bool
 }
 
 // New builds an Authenticator, fetching the JWKS (cached + auto-refreshed).
@@ -49,31 +47,24 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("oidc: load jwks: %w", err)
 	}
-	orgClaim := cfg.OrgClaim
-	if orgClaim == "" {
-		orgClaim = "org_id"
+	emailClaim := cfg.EmailClaim
+	if emailClaim == "" {
+		emailClaim = "email"
 	}
-	slugClaim := cfg.SlugClaim
-	if slugClaim == "" {
-		slugClaim = "org_slug"
-	}
-	roleClaim := cfg.RoleClaim
-	if roleClaim == "" {
-		roleClaim = "org_role"
+	nameClaim := cfg.NameClaim
+	if nameClaim == "" {
+		nameClaim = "name"
 	}
 	cookie := cfg.CookieName
 	if cookie == "" {
 		cookie = "__session"
 	}
-	return &Authenticator{
-		kf: kf, issuer: cfg.Issuer, orgClaim: orgClaim, slugClaim: slugClaim,
-		roleClaim: roleClaim, cookie: cookie, requireOrg: cfg.RequireOrg,
-	}, nil
+	return &Authenticator{kf: kf, issuer: cfg.Issuer, emailClaim: emailClaim, nameClaim: nameClaim, cookie: cookie}, nil
 }
 
-// Authorize verifies the token and returns the tenant identity. The tenant id
-// is placed in Claims["org"] (the org claim, or the subject when no org and
-// RequireOrg is false) — that's what the tenant CoreResolver keys on.
+// Authorize verifies the token and returns the user identity: Subject is the
+// stable user id (sub); Claims carries optional email/name for the workspace
+// layer (member display + email-restricted invites).
 func (a *Authenticator) Authorize(r *http.Request) (httpapi.Identity, bool) {
 	raw := bearer(r)
 	if raw == "" {
@@ -98,24 +89,15 @@ func (a *Authenticator) Authorize(r *http.Request) (httpapi.Identity, bool) {
 		}
 	}
 	sub, _ := claims["sub"].(string)
-	org, _ := claims[a.orgClaim].(string)
-	if org == "" {
-		if a.requireOrg {
-			return httpapi.Identity{}, false
-		}
-		org = "u_" + sub // fall back to a per-user tenant
-	}
-	if org == "" {
+	if sub == "" {
 		return httpapi.Identity{}, false
 	}
-	// Slug seeds a new workspace's task-id prefix; role gates admin UI. Both are
-	// present only when an org is active and the session token carries them.
-	out := map[string]string{"org": org}
-	if slug, _ := claims[a.slugClaim].(string); slug != "" {
-		out["org_slug"] = slug
+	out := map[string]string{}
+	if email, _ := claims[a.emailClaim].(string); email != "" {
+		out["email"] = email
 	}
-	if role, _ := claims[a.roleClaim].(string); role != "" {
-		out["org_role"] = role
+	if name, _ := claims[a.nameClaim].(string); name != "" {
+		out["name"] = name
 	}
 	return httpapi.Identity{Subject: sub, Claims: out}, true
 }

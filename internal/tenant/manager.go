@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/tristanMatthias/agenttasks/internal/workspaces"
 	"github.com/tristanMatthias/tasks/pkg/core"
 	"github.com/tristanMatthias/tasks/pkg/httpapi"
 	"github.com/tristanMatthias/tasks/pkg/store"
@@ -20,6 +21,7 @@ type Manager struct {
 	dir      string
 	prefix   string
 	onChange func(org string)
+	ws       *workspaces.Store // control store, for membership-checked routing
 
 	mu    sync.Mutex
 	cores map[string]*core.Core
@@ -32,6 +34,9 @@ type Options struct {
 	// OnChange, if set, is invoked (with the org id) after any mutation in that
 	// tenant — used to drive per-tenant backup/export.
 	OnChange func(org string)
+	// Workspaces is the control store used to resolve a human's active workspace
+	// and verify membership. When nil, every user gets only their personal board.
+	Workspaces *workspaces.Store
 }
 
 // New builds a Manager.
@@ -40,23 +45,27 @@ func New(opts Options) *Manager {
 	if prefix == "" {
 		prefix = "t"
 	}
-	return &Manager{dir: opts.Dir, prefix: prefix, onChange: opts.OnChange, cores: map[string]*core.Core{}}
+	return &Manager{dir: opts.Dir, prefix: prefix, onChange: opts.OnChange, ws: opts.Workspaces, cores: map[string]*core.Core{}}
 }
 
-// Resolve is the httpapi.CoreResolver: it reads the org (and its slug) from the
-// request's authenticated Identity and returns that tenant's Core. A browser
-// (JWT) request carries the slug, so it's the one that provisions a brand-new
-// workspace — seeding a prefix derived from that slug.
+// Resolve is the httpapi.CoreResolver. An API key embeds its workspace selector
+// and is self-authorizing, so it routes straight to that workspace. A human
+// (session/token) routes to their active workspace — but only after the control
+// store confirms they're a member; otherwise they fall back to their personal
+// board. A brand-new workspace is seeded with its stored prefix on first visit.
 func (m *Manager) Resolve(r *http.Request) (*core.Core, error) {
 	id, ok := httpapi.IdentityFrom(r.Context())
 	if !ok {
 		return nil, errors.New("no identity")
 	}
-	org := id.Claims["org"]
-	if org == "" {
-		return nil, errors.New("no tenant in token")
+	if org := id.Claims["org"]; org != "" {
+		return m.CoreFor(org) // API key: selector is the workspace id
 	}
-	return m.CoreForSeed(org, id.Claims["org_slug"])
+	if m.ws == nil {
+		return m.CoreForSeed(workspaces.PersonalID(id.Subject), "")
+	}
+	wsID, prefix := m.ws.Active(id.Subject, r)
+	return m.CoreForSeed(wsID, prefix)
 }
 
 // CoreFor returns (lazily creating + caching) the Core for an org WITHOUT
