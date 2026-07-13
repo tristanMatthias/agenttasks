@@ -5,7 +5,7 @@ go 1.25.1
 require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/tristanMatthias/tasks v0.0.0-20260713073816-bda29d77ee74
+	github.com/tristanMatthias/tasks v0.0.0-20260713074915-c5be8d0d9337
 	modernc.org/sqlite v1.53.0
 )
 
