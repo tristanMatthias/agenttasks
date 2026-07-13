@@ -5,12 +5,13 @@ go 1.25.1
 require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/tristanMatthias/tasks v0.0.0-20260713074915-c5be8d0d9337
+	github.com/tristanMatthias/tasks v0.0.0-20260713192911-5101c9dccff4
 	modernc.org/sqlite v1.53.0
 )
 
 require (
 	github.com/MicahParks/jwkset v0.11.0 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect

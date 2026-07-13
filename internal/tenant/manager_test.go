@@ -131,3 +131,48 @@ func TestSlugify(t *testing.T) {
 		}
 	}
 }
+
+// A mutation in a tenant fires the per-tenant onChange with that tenant's org id
+// and the affected task id(s) — the seam WebSocket broadcasts ride on. The hook
+// is installed lazily (via SetOnChange, mirroring how the server wires it after
+// construction) yet still reaches an already-created Core.
+func TestSetOnChange_FiresPerTenantWithIDs(t *testing.T) {
+	m := New(Options{Dir: t.TempDir()})
+	defer m.Close()
+
+	// Create the Core BEFORE registering the listener, to prove late binding.
+	c, err := m.CoreForSeed("org_live", "Live")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotOrg string
+	var gotIDs []string
+	m.SetOnChange(func(org string, ids []string) {
+		gotOrg = org
+		gotIDs = ids
+	})
+
+	task, err := c.Create(core.CreateParams{Title: "ping"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOrg != "org_live" {
+		t.Fatalf("onChange org = %q, want org_live", gotOrg)
+	}
+	if len(gotIDs) != 1 || gotIDs[0] != task.ID {
+		t.Fatalf("onChange ids = %v, want [%s]", gotIDs, task.ID)
+	}
+
+	// A change in a DIFFERENT tenant reports that tenant's org, never the first.
+	c2, err := m.CoreForSeed("org_other", "Other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Create(core.CreateParams{Title: "pong"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotOrg != "org_other" {
+		t.Fatalf("onChange org = %q, want org_other", gotOrg)
+	}
+}

@@ -20,7 +20,7 @@ import (
 type Manager struct {
 	dir      string
 	prefix   string
-	onChange func(org string)
+	onChange func(org string, ids []string)
 	ws       *workspaces.Store // control store, for membership-checked routing
 
 	mu    sync.Mutex
@@ -31,9 +31,10 @@ type Manager struct {
 type Options struct {
 	Dir    string // directory holding <org>.db files
 	Prefix string // fallback id prefix when a workspace has no usable slug (default "t")
-	// OnChange, if set, is invoked (with the org id) after any mutation in that
-	// tenant — used to drive per-tenant backup/export.
-	OnChange func(org string)
+	// OnChange, if set, is invoked (with the org id + affected task ids) after any
+	// mutation in that tenant. Can also be set later via SetOnChange (used to wire
+	// WebSocket broadcasts once the server exists).
+	OnChange func(org string, ids []string)
 	// Workspaces is the control store used to resolve a human's active workspace
 	// and verify membership. When nil, every user gets only their personal board.
 	Workspaces *workspaces.Store
@@ -124,12 +125,39 @@ func (m *Manager) coreFor(org, slug string, seed bool) (*core.Core, error) {
 		st.Close()
 		return nil, err
 	}
-	if m.onChange != nil {
-		org := org
-		c.SetOnChange(func() { m.onChange(org) })
-	}
+	// Always install the hook (nil-checked at fire time) so a listener wired
+	// AFTER this Core was created — e.g. WebSocket broadcasting, set once the
+	// server exists — still receives this tenant's changes. org is a per-call
+	// parameter, so the closure captures the right tenant.
+	c.SetOnChange(func(ids []string) {
+		if m.onChange != nil {
+			m.onChange(org, ids)
+		}
+	})
 	m.cores[org] = c
 	return c, nil
+}
+
+// SetOnChange registers the per-tenant mutation listener (org id + affected task
+// ids). Applies to already-created Cores too, since each core's hook reads this
+// field at fire time.
+func (m *Manager) SetOnChange(fn func(org string, ids []string)) { m.onChange = fn }
+
+// TopicFor returns the tenant key a request's live updates belong to — the SAME
+// org id Resolve routes it to — so httpapi's WebSocket topic matches Publish.
+func (m *Manager) TopicFor(r *http.Request) string {
+	id, ok := httpapi.IdentityFrom(r.Context())
+	if !ok {
+		return ""
+	}
+	if org := id.Claims["org"]; org != "" {
+		return org
+	}
+	if m.ws == nil {
+		return workspaces.PersonalID(id.Subject)
+	}
+	wsID, _ := m.ws.Active(id.Subject, r)
+	return wsID
 }
 
 // prefixFrom picks a task-id prefix for a new workspace: the org slug if present

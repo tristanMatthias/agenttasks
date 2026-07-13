@@ -38,8 +38,10 @@ type Config struct {
 	// Auth overrides the built authenticator (used by tests). If set, JWKSURL is
 	// ignored.
 	Auth httpapi.Authenticator
-	// OnTenantChange is invoked (with the org id) after any mutation in a tenant.
-	OnTenantChange func(org string)
+	// OnTenantChange, if set, is invoked (org id + affected task ids) after any
+	// mutation in a tenant. WebSocket broadcasting is wired automatically; this is
+	// an extra hook (e.g. per-tenant backup/export).
+	OnTenantChange func(org string, ids []string)
 }
 
 // App is the assembled control plane.
@@ -76,7 +78,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	mgr := tenant.New(tenant.Options{Dir: cfg.DataDir, Prefix: cfg.Prefix, OnChange: cfg.OnTenantChange, Workspaces: wsStore})
+	mgr := tenant.New(tenant.Options{Dir: cfg.DataDir, Prefix: cfg.Prefix, Workspaces: wsStore})
 	// Accept per-workspace API keys (tasks_<workspace>_<secret>) in front of sessions.
 	authn = composite{jwt: jwtAuth, tenants: mgr}
 	wsAPI := workspaces.NewAPI(wsStore, authn)
@@ -153,6 +155,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	srv := httpapi.New(httpapi.Config{
 		Auth:                authn,
 		Resolve:             mgr.Resolve,
+		TopicFor:            mgr.TopicFor, // scope live (WebSocket) updates per workspace
 		MCP:                 mcpsrv.HandlerResolved(mgr.Resolve), // per-tenant MCP at /mcp (auth-gated)
 		LoginURL:            loginURL,
 		ResourceMetadataURL: resourceMeta,
@@ -163,6 +166,16 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		RateLimit:           cfg.RateLimit,
 		RateBurst:           burst,
 		Metrics:             true,
+	})
+
+	// Broadcast every tenant mutation to that workspace's WebSocket clients (topic
+	// = org id, matching TopicFor). Wired now that srv exists; the manager applies
+	// it to already-created Cores too. Compose any external hook the host passed.
+	mgr.SetOnChange(func(org string, ids []string) {
+		srv.Publish(org, ids)
+		if cfg.OnTenantChange != nil {
+			cfg.OnTenantChange(org, ids)
+		}
 	})
 
 	// Front the tasks handler with the control-plane endpoints: the workspace API
