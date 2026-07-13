@@ -86,6 +86,22 @@ window.addEventListener("load", async () => {
 // signed-in user) refreshed the session cookie. A logged-out visitor is NOT
 // bounced — the SPA renders the public landing page, whose Log in button sends
 // them to /sign-in (preserving the current path as the redirect target).
+// clerkCSP is a Content-Security-Policy that permits ClerkJS to load and run on
+// the board. The default 'self'-only policy blocks clerk.browser.js (loaded from
+// the Frontend API domain), Clerk's inline scripts, and its XHR/telemetry — so
+// ClerkJS can't establish a session and every cookie-authed API call 401s. Same-
+// origin 'self' already covers our own WebSocket (wss://<host>/api/ws).
+func clerkCSP(frontendAPI string) string {
+	c := "https://" + frontendAPI
+	return "default-src 'self'; " +
+		"script-src 'self' 'unsafe-inline' " + c + " https://challenges.cloudflare.com; " +
+		"connect-src 'self' " + c + " https://*.clerk.accounts.dev https://clerk-telemetry.com; " +
+		"img-src 'self' data: https://img.clerk.com " + c + "; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"worker-src 'self' blob:; " +
+		"frame-src 'self' " + c + " https://challenges.cloudflare.com"
+}
+
 func clerkBootHead(pk, frontendAPI string) string {
 	return `<script async crossorigin data-clerk-publishable-key="` + pk + `" ` +
 		`src="https://` + frontendAPI + `/npm/@clerk/clerk-js@5/dist/clerk.browser.js"></script>` +

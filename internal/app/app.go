@@ -147,9 +147,14 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 
 	// Keep Clerk's session alive on the board page (ClerkJS refreshes the
 	// short-lived __session cookie), so refreshes don't bounce through /sign-in.
-	injectHead := ""
+	// This REQUIRES a Clerk-aware CSP — the default 'self'-only policy blocks
+	// ClerkJS from loading/connecting, so the session never establishes and every
+	// cookie-authed API call 401s. Keep injectHead + csp in lockstep.
+	injectHead, csp := "", ""
 	if cfg.PublishableKey != "" {
-		injectHead = clerkBootHead(cfg.PublishableKey, frontendAPIFromPublishableKey(cfg.PublishableKey))
+		frontendAPI := frontendAPIFromPublishableKey(cfg.PublishableKey)
+		injectHead = clerkBootHead(cfg.PublishableKey, frontendAPI)
+		csp = clerkCSP(frontendAPI)
 	}
 
 	srv := httpapi.New(httpapi.Config{
@@ -160,6 +165,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		LoginURL:            loginURL,
 		ResourceMetadataURL: resourceMeta,
 		InjectHead:          injectHead,
+		CSP:                 csp,
 		Static:              web.Static(),
 		Logger:              cfg.Logger,
 		BehindProxy:         cfg.BehindProxy,
