@@ -100,6 +100,16 @@ CREATE TABLE IF NOT EXISTS invites (
   accepted_at  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);
+-- External identities (e.g. GitHub) mapped to a canonical subject, so a login
+-- provider swap or a re-auth reuses the same tenant/board.
+CREATE TABLE IF NOT EXISTS identities (
+  provider    TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  subject     TEXT NOT NULL,
+  login       TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (provider, provider_id)
+);
 CREATE INDEX IF NOT EXISTS idx_invites_ws ON invites(workspace_id);
 `
 
@@ -125,6 +135,28 @@ func Open(path string) (*Store, error) {
 
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
+
+// LinkedSubject returns the canonical subject a provider identity maps to, if any.
+func (s *Store) LinkedSubject(provider, providerID string) (string, bool) {
+	var sub string
+	err := s.db.QueryRow(
+		`SELECT subject FROM identities WHERE provider=? AND provider_id=?`, provider, providerID,
+	).Scan(&sub)
+	if err != nil || sub == "" {
+		return "", false
+	}
+	return sub, true
+}
+
+// LinkIdentity records (or refreshes) a provider identity → subject mapping.
+func (s *Store) LinkIdentity(provider, providerID, subject, login string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO identities (provider, provider_id, subject, login, created_at)
+		 VALUES (?,?,?,?,?)
+		 ON CONFLICT(provider, provider_id) DO UPDATE SET login=excluded.login`,
+		provider, providerID, subject, login, now())
+	return err
+}
 
 // now is RFC3339Nano so list ordering is stable even within the same second.
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }

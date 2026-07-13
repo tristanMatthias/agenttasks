@@ -41,3 +41,21 @@ func (a composite) Authorize(r *http.Request) (httpapi.Identity, bool) {
 	}
 	return a.jwt.Authorize(r)
 }
+
+// Login/Logout delegate to the identity authenticator when it drives a browser
+// login flow (so POST /api/login + /api/logout are mounted and reach it).
+func (a composite) Login(w http.ResponseWriter, r *http.Request) {
+	if lp, ok := a.jwt.(httpapi.LoginProvider); ok {
+		lp.Login(w, r)
+		return
+	}
+	http.Error(w, "login not supported", http.StatusNotFound)
+}
+
+func (a composite) Logout(w http.ResponseWriter, r *http.Request) {
+	if lp, ok := a.jwt.(httpapi.LoginProvider); ok {
+		lp.Logout(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

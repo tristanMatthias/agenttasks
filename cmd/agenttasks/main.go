@@ -23,8 +23,9 @@ func main() {
 
 	jwks := env("AGENTTASKS_JWKS_URL", env("CLERK_JWKS_URL", ""))
 	devToken := os.Getenv("AGENTTASKS_DEV_TOKEN") // local dev only: fixed-token auth, no IdP
-	if jwks == "" && devToken == "" {
-		logger.Error("AGENTTASKS_JWKS_URL (or CLERK_JWKS_URL) is required")
+	ghClientID := os.Getenv("GITHUB_CLIENT_ID")
+	if jwks == "" && devToken == "" && ghClientID == "" {
+		logger.Error("set GITHUB_CLIENT_ID (GitHub sign-in) or AGENTTASKS_JWKS_URL")
 		os.Exit(1)
 	}
 	addr := env("AGENTTASKS_ADDR", "")
@@ -53,6 +54,12 @@ func main() {
 		PublicURL:      env("AGENTTASKS_PUBLIC_URL", "https://agenttasks.sh"),
 		OAuthSecret:    os.Getenv("AGENTTASKS_OAUTH_SECRET"),
 		BehindProxy:    os.Getenv("AGENTTASKS_BEHIND_PROXY") == "true",
+
+		GitHubClientID:     ghClientID,
+		GitHubClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+		SessionSecret:      os.Getenv("AGENTTASKS_SESSION_SECRET"),
+		OwnerGitHubLogin:   os.Getenv("AGENTTASKS_OWNER_GITHUB"),
+		OwnerSubject:       os.Getenv("AGENTTASKS_OWNER_SUBJECT"),
 		RateLimit:      20,
 		Logger:         logger,
 	}
