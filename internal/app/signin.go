@@ -92,7 +92,7 @@ func clerkBootHead(pk, frontendAPI string) string {
 		`<script>window.__authReady=new Promise(function(resolve){function boot(){` +
 		`if(!window.Clerk){setTimeout(boot,50);return;}` +
 		`window.Clerk.load().then(async function(){` +
-		`if(window.Clerk.user){try{await window.Clerk.session.getToken();}catch(e){}}` +
+		`if(window.Clerk.session){try{await window.Clerk.session.getToken({skipCache:true});}catch(e){}}` +
 		`resolve();` +
 		`}).catch(function(){resolve();});}boot();});</script>`
 }
