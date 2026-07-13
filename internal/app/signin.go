@@ -89,12 +89,31 @@ window.addEventListener("load", async () => {
 func clerkBootHead(pk, frontendAPI string) string {
 	return `<script async crossorigin data-clerk-publishable-key="` + pk + `" ` +
 		`src="https://` + frontendAPI + `/npm/@clerk/clerk-js@5/dist/clerk.browser.js"></script>` +
-		`<script>window.__authReady=new Promise(function(resolve){function boot(){` +
+		`<script>(function(){` +
+		// 1) Refresh-and-retry any same-origin API call that 401s because Clerk's
+		//    short-lived __session cookie went stale — reads AND writes, at boot or
+		//    mid-session. Without this, a stale cookie makes the board silently show
+		//    cached data + optimistic edits that never persist or refresh (while the
+		//    __client_uat fallback keeps the app visible). Cross-origin calls (incl.
+		//    Clerk's own) are left untouched, so there's no retry loop.
+		`var of=window.fetch.bind(window);` +
+		`window.fetch=function(input,init){return of(input,init).then(function(res){` +
+		`if(res.status!==401)return res;` +
+		`var u=(typeof input==="string")?input:(input&&input.url)||"";` +
+		`if(u.indexOf("/api/")<0&&u.indexOf("/mcp")<0)return res;` +
+		`if(!window.Clerk||!window.Clerk.session)return res;` +
+		`return window.Clerk.session.getToken({skipCache:true}).then(function(){return of(input,init);}).catch(function(){return res;});` +
+		`});};` +
+		// 2) __authReady: wait for the session to hydrate, then force-refresh the
+		//    cookie, so the very first reads carry a valid session.
+		`window.__authReady=new Promise(function(resolve){function boot(){` +
 		`if(!window.Clerk){setTimeout(boot,50);return;}` +
 		`window.Clerk.load().then(async function(){` +
+		`for(var i=0;i<30&&!window.Clerk.session;i++){await new Promise(function(r){setTimeout(r,100);});}` +
 		`if(window.Clerk.session){try{await window.Clerk.session.getToken({skipCache:true});}catch(e){}}` +
 		`resolve();` +
-		`}).catch(function(){resolve();});}boot();});</script>`
+		`}).catch(function(){resolve();});}boot();});` +
+		`})();</script>`
 }
 
 func signInHandler(pk, frontendAPI string) http.HandlerFunc {
