@@ -36,6 +36,8 @@ github.com/segmentio/encoding v0.5.4 h1:OW1VRern8Nw6ITAtwSZ7Idrl3MXCFwXHPgqESYfv
 github.com/segmentio/encoding v0.5.4/go.mod h1:HS1ZKa3kSN32ZHVZ7ZLPLXWvOVIiZtyJnO1gPH1sKt0=
 github.com/tristanMatthias/tasks v0.0.0-20260713214028-0b5687829608 h1:LbCX/zHo9I8bB/k4Y9VE07b1QmYOZJzQohV1evxSC90=
 github.com/tristanMatthias/tasks v0.0.0-20260713214028-0b5687829608/go.mod h1:WHBSLges1mRda31KwWcRk4lhma8SQuSL9O604JKujhw=
+github.com/tristanMatthias/tasks v0.0.0-20260713221012-73d1ec4b45a2 h1:MTvS8Dq52nO0I6F2gAHhVNYFTey2+vZ1gdDHtDRCDAU=
+github.com/tristanMatthias/tasks v0.0.0-20260713221012-73d1ec4b45a2/go.mod h1:WHBSLges1mRda31KwWcRk4lhma8SQuSL9O604JKujhw=
 github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
 github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
 golang.org/x/mod v0.36.0 h1:JJjpVx6myfUsUdAzZuOSTTmRE0PfZeNWzzvKrP7amb4=
