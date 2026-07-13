@@ -106,27 +106,33 @@ func clerkBootHead(pk, frontendAPI string) string {
 	return `<script async crossorigin data-clerk-publishable-key="` + pk + `" ` +
 		`src="https://` + frontendAPI + `/npm/@clerk/clerk-js@5/dist/clerk.browser.js"></script>` +
 		`<script>(function(){` +
-		// 1) Refresh-and-retry any same-origin API call that 401s because Clerk's
-		//    short-lived __session cookie went stale — reads AND writes, at boot or
-		//    mid-session. Without this, a stale cookie makes the board silently show
-		//    cached data + optimistic edits that never persist or refresh (while the
-		//    __client_uat fallback keeps the app visible). Cross-origin calls (incl.
-		//    Clerk's own) are left untouched, so there's no retry loop.
+		// Refresh-and-retry any same-origin API call that 401s because Clerk's
+		//    short-lived __session cookie is stale/not-yet-hydrated — reads AND
+		//    writes, at boot or mid-session. On a 401 we wait (up to ~3s, ONLY for
+		//    that request) for ClerkJS to hydrate a session, then force-refresh the
+		//    cookie and retry once. This keeps rendering instant (the app never
+		//    blocks on Clerk) while stale reads self-heal. Cross-origin calls
+		//    (incl. Clerk's own) are untouched, so there's no retry loop.
 		`var of=window.fetch.bind(window);` +
+		`function waitSession(){return new Promise(function(res){var n=0;(function p(){` +
+		`if(window.Clerk&&window.Clerk.session)return res(window.Clerk.session);` +
+		`if(n++>30)return res(null);setTimeout(p,100);})();});}` +
 		`window.fetch=function(input,init){return of(input,init).then(function(res){` +
 		`if(res.status!==401)return res;` +
 		`var u=(typeof input==="string")?input:(input&&input.url)||"";` +
 		`if(u.indexOf("/api/")<0&&u.indexOf("/mcp")<0)return res;` +
-		`if(!window.Clerk||!window.Clerk.session)return res;` +
-		`return window.Clerk.session.getToken({skipCache:true}).then(function(){return of(input,init);}).catch(function(){return res;});` +
+		`if(!window.Clerk)return res;` +
+		`return waitSession().then(function(s){if(!s)return res;` +
+		`return s.getToken({skipCache:true}).then(function(){return of(input,init);}).catch(function(){return res;});});` +
 		`});};` +
-		// 2) __authReady: wait for the session to hydrate, then force-refresh the
-		//    cookie, so the very first reads carry a valid session.
+		// __authReady resolves as soon as ClerkJS has loaded — it does NOT block on
+		//    session hydration (that was the refresh spinner). Best-effort refresh
+		//    the cookie if a session is already present; otherwise the 401 retry
+		//    above covers it.
 		`window.__authReady=new Promise(function(resolve){function boot(){` +
 		`if(!window.Clerk){setTimeout(boot,50);return;}` +
-		`window.Clerk.load().then(async function(){` +
-		`for(var i=0;i<30&&!window.Clerk.session;i++){await new Promise(function(r){setTimeout(r,100);});}` +
-		`if(window.Clerk.session){try{await window.Clerk.session.getToken({skipCache:true});}catch(e){}}` +
+		`window.Clerk.load().then(function(){` +
+		`try{if(window.Clerk.session)window.Clerk.session.getToken({skipCache:true});}catch(e){}` +
 		`resolve();` +
 		`}).catch(function(){resolve();});}boot();});` +
 		`})();</script>`
