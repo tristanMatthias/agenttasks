@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -52,8 +53,10 @@ type Config struct {
 	OwnerSubject     string
 
 	// GitHub → board linking (Linear-style). WebhookSecret verifies the GitHub App
-	// webhook; OwnerRepo ("owner/name"), if set, is linked to the owner's board.
+	// webhook; GitHubAppSlug drives the per-workspace "Connect GitHub" install
+	// flow; OwnerRepo ("owner/name"), if set, is a manual repo→owner-board seed.
 	GitHubWebhookSecret string
+	GitHubAppSlug       string
 	OwnerRepo           string
 
 	// Auth overrides the built authenticator (used by tests). If set, JWKSURL is
@@ -212,7 +215,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	srv := httpapi.New(httpapi.Config{
 		Auth:                authn,
 		Resolve:             mgr.Resolve,
-		TopicFor:            mgr.TopicFor, // scope live (WebSocket) updates per workspace
+		TopicFor:            mgr.TopicFor,                        // scope live (WebSocket) updates per workspace
 		MCP:                 mcpsrv.HandlerResolved(mgr.Resolve), // per-tenant MCP at /mcp (auth-gated)
 		LoginURL:            loginURL,
 		ResourceMetadataURL: resourceMeta,
@@ -246,14 +249,17 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 	// GitHub → board auto-linking (PRs/commits close & link tickets, Linear-style).
 	if cfg.GitHubWebhookSecret != "" {
+		// Optional manual seed (a single owner repo → board) for setups without
+		// the App install flow.
 		if cfg.OwnerRepo != "" && cfg.OwnerSubject != "" {
 			if err := wsStore.LinkRepo(cfg.OwnerRepo, workspaces.PersonalID(cfg.OwnerSubject)); err != nil {
 				cfg.Logger.Warn("link owner repo", "err", err)
 			}
 		}
 		ghlink.New(ghlink.Config{
-			Secret: []byte(cfg.GitHubWebhookSecret),
-			Logger: cfg.Logger,
+			Secret:   []byte(cfg.GitHubWebhookSecret),
+			Logger:   cfg.Logger,
+			Installs: wsStore, // installation webhooks auto-link repos
 			Resolve: func(repo string) (*core.Core, bool) {
 				ws, ok := wsStore.RepoWorkspace(repo)
 				if !ok {
@@ -266,6 +272,51 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 				return c, true
 			},
 		}).Register(mux)
+
+		// "Connect GitHub" install flow (per workspace), when the shared App slug
+		// is configured. Authenticates via the session and binds the resulting
+		// installation to the caller's active workspace.
+		if cfg.GitHubAppSlug != "" {
+			stateSecret := cfg.SessionSecret
+			if stateSecret == "" {
+				stateSecret = cfg.OAuthSecret
+			}
+			(&ghlink.Connector{
+				AppSlug:     cfg.GitHubAppSlug,
+				StateSecret: []byte(stateSecret),
+				Logger:      cfg.Logger,
+				Workspace: func(r *http.Request) (string, bool) {
+					id, ok := jwtAuth.Authorize(r)
+					if !ok {
+						return "", false
+					}
+					ws, _ := wsStore.Active(id.Subject, r)
+					return ws, true
+				},
+				Bind: func(installationID int64, ws string) error {
+					return wsStore.SetInstallation(installationID, ws, "")
+				},
+			}).Register(mux)
+		}
+
+		// Status endpoint for the settings UI: which repos are linked to the
+		// caller's active workspace.
+		mux.HandleFunc("GET /api/integrations/github", func(w http.ResponseWriter, r *http.Request) {
+			id, ok := jwtAuth.Authorize(r)
+			if !ok {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ws, _ := wsStore.Active(id.Subject, r)
+			repos, _ := wsStore.ReposForWorkspace(ws)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"connected":   len(repos) > 0,
+				"repos":       repos,
+				"connect_url": "/integrations/github/connect",
+				"app_slug":    cfg.GitHubAppSlug,
+			})
+		})
 	}
 	if cfg.GitHubClientID == "" && cfg.PublishableKey != "" {
 		sign := signInHandler(cfg.PublishableKey, frontendAPIFromPublishableKey(cfg.PublishableKey))

@@ -111,11 +111,26 @@ CREATE TABLE IF NOT EXISTS identities (
   PRIMARY KEY (provider, provider_id)
 );
 -- Which GitHub repo ("owner/name") feeds which workspace's board (for the
--- Linear-style PR/commit auto-linking).
+-- Linear-style PR/commit auto-linking). Populated by the GitHub App install flow.
 CREATE TABLE IF NOT EXISTS repo_links (
   repo         TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
   created_at   TEXT NOT NULL
+);
+-- GitHub App installations: which install (and its account) belongs to which
+-- workspace, set when a user connects from settings.
+CREATE TABLE IF NOT EXISTS gh_installations (
+  installation_id INTEGER PRIMARY KEY,
+  workspace_id    TEXT NOT NULL,
+  account         TEXT NOT NULL DEFAULT '',
+  created_at      TEXT NOT NULL
+);
+-- Repos seen for an installation (stashed so setup + webhook can arrive in any
+-- order; joined with gh_installations to populate repo_links).
+CREATE TABLE IF NOT EXISTS gh_install_repos (
+  installation_id INTEGER NOT NULL,
+  repo            TEXT NOT NULL,
+  PRIMARY KEY (installation_id, repo)
 );
 CREATE INDEX IF NOT EXISTS idx_invites_ws ON invites(workspace_id);
 `
@@ -181,6 +196,113 @@ func (s *Store) LinkRepo(repo, workspaceID string) error {
 		 ON CONFLICT(repo) DO UPDATE SET workspace_id=excluded.workspace_id`,
 		repo, workspaceID, now())
 	return err
+}
+
+// UnlinkRepo removes a repo→workspace mapping.
+func (s *Store) UnlinkRepo(repo string) error {
+	_, err := s.db.Exec(`DELETE FROM repo_links WHERE repo=?`, repo)
+	return err
+}
+
+// ReposForWorkspace lists the repos linked to a workspace (for the settings UI).
+func (s *Store) ReposForWorkspace(workspaceID string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT repo FROM repo_links WHERE workspace_id=? ORDER BY repo`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// --- GitHub App installations ---
+
+// SetInstallation records that an install belongs to a workspace, then links any
+// repos already seen for it (setup + webhook can arrive in either order).
+func (s *Store) SetInstallation(installationID int64, workspaceID, account string) error {
+	if _, err := s.db.Exec(
+		`INSERT INTO gh_installations (installation_id, workspace_id, account, created_at)
+		 VALUES (?,?,?,?)
+		 ON CONFLICT(installation_id) DO UPDATE SET workspace_id=excluded.workspace_id, account=excluded.account`,
+		installationID, workspaceID, account, now()); err != nil {
+		return err
+	}
+	repos, _ := s.installRepos(installationID)
+	for _, r := range repos {
+		_ = s.LinkRepo(r, workspaceID)
+	}
+	return nil
+}
+
+// InstallationWorkspace returns the workspace an install is bound to, if known.
+func (s *Store) InstallationWorkspace(installationID int64) (string, bool) {
+	var ws string
+	if err := s.db.QueryRow(`SELECT workspace_id FROM gh_installations WHERE installation_id=?`, installationID).Scan(&ws); err != nil || ws == "" {
+		return "", false
+	}
+	return ws, true
+}
+
+// AddInstallRepos stashes an install's repos and links any whose workspace is
+// already known.
+func (s *Store) AddInstallRepos(installationID int64, repos []string) error {
+	for _, r := range repos {
+		if _, err := s.db.Exec(
+			`INSERT OR IGNORE INTO gh_install_repos (installation_id, repo) VALUES (?,?)`,
+			installationID, r); err != nil {
+			return err
+		}
+	}
+	if ws, ok := s.InstallationWorkspace(installationID); ok {
+		for _, r := range repos {
+			_ = s.LinkRepo(r, ws)
+		}
+	}
+	return nil
+}
+
+// RemoveInstallRepos unlinks repos from an install.
+func (s *Store) RemoveInstallRepos(installationID int64, repos []string) error {
+	for _, r := range repos {
+		_, _ = s.db.Exec(`DELETE FROM gh_install_repos WHERE installation_id=? AND repo=?`, installationID, r)
+		_ = s.UnlinkRepo(r)
+	}
+	return nil
+}
+
+// DeleteInstallation removes an install and all its repo links (uninstall).
+func (s *Store) DeleteInstallation(installationID int64) error {
+	repos, _ := s.installRepos(installationID)
+	for _, r := range repos {
+		_ = s.UnlinkRepo(r)
+	}
+	_, _ = s.db.Exec(`DELETE FROM gh_install_repos WHERE installation_id=?`, installationID)
+	_, err := s.db.Exec(`DELETE FROM gh_installations WHERE installation_id=?`, installationID)
+	return err
+}
+
+func (s *Store) installRepos(installationID int64) ([]string, error) {
+	rows, err := s.db.Query(`SELECT repo FROM gh_install_repos WHERE installation_id=?`, installationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // now is RFC3339Nano so list ordering is stable even within the same second.

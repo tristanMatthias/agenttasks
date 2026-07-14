@@ -188,3 +188,53 @@ func TestDeleteCascades(t *testing.T) {
 		t.Fatalf("invites after delete = %d, want 0", len(pend))
 	}
 }
+
+func TestRepoLinksAndInstallations(t *testing.T) {
+	s := openTest(t)
+
+	// Webhook arrives BEFORE the user finishes the connect setup: repos are
+	// stashed but not yet linked (no workspace known).
+	if err := s.AddInstallRepos(100, []string{"me/a", "me/b"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.RepoWorkspace("me/a"); ok {
+		t.Fatal("repo should not be linked before the installation is bound")
+	}
+
+	// Setup binds the installation → workspace, which links the stashed repos.
+	if err := s.SetInstallation(100, "ws_x", "octo"); err != nil {
+		t.Fatal(err)
+	}
+	if ws, ok := s.RepoWorkspace("me/a"); !ok || ws != "ws_x" {
+		t.Fatalf("me/a -> (%q,%v), want ws_x", ws, ok)
+	}
+	repos, _ := s.ReposForWorkspace("ws_x")
+	if len(repos) != 2 {
+		t.Fatalf("workspace repos = %v, want 2", repos)
+	}
+
+	// A later "repository added" links immediately (workspace already known).
+	if err := s.AddInstallRepos(100, []string{"me/c"}); err != nil {
+		t.Fatal(err)
+	}
+	if ws, ok := s.RepoWorkspace("me/c"); !ok || ws != "ws_x" {
+		t.Fatalf("me/c -> (%q,%v), want ws_x", ws, ok)
+	}
+
+	// Removing a repo unlinks it.
+	_ = s.RemoveInstallRepos(100, []string{"me/c"})
+	if _, ok := s.RepoWorkspace("me/c"); ok {
+		t.Fatal("me/c should be unlinked after removal")
+	}
+
+	// Uninstalling drops every repo for the installation.
+	if err := s.DeleteInstallation(100); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.RepoWorkspace("me/a"); ok {
+		t.Fatal("uninstall should unlink all repos")
+	}
+	if _, ok := s.InstallationWorkspace(100); ok {
+		t.Fatal("installation should be gone")
+	}
+}

@@ -24,13 +24,25 @@ import (
 
 const actor = "github"
 
+// Installs records GitHub App installations and their repos (populated from
+// installation webhooks; the workspace binding is set separately by the connect
+// flow's setup callback).
+type Installs interface {
+	AddInstallRepos(installationID int64, repos []string) error
+	RemoveInstallRepos(installationID int64, repos []string) error
+	DeleteInstallation(installationID int64) error
+}
+
 // Config configures the webhook handler.
 type Config struct {
 	Secret []byte // GitHub App webhook secret (HMAC-SHA256); required
 	// Resolve maps a repo full name ("owner/repo") to its board, or (nil,false)
 	// if the repo isn't linked.
 	Resolve func(repoFullName string) (*core.Core, bool)
-	Logger  *slog.Logger
+	// Installs, if set, receives installation lifecycle events so installing the
+	// App auto-links its repos.
+	Installs Installs
+	Logger   *slog.Logger
 }
 
 // Handler serves POST /webhooks/github.
@@ -64,6 +76,10 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		h.onPush(body)
 	case "create":
 		h.onCreate(body)
+	case "installation":
+		h.onInstallation(body)
+	case "installation_repositories":
+		h.onInstallationRepos(body)
 	}
 	// Always 200 so GitHub doesn't retry on our processing choices.
 	w.WriteHeader(http.StatusOK)
@@ -174,6 +190,66 @@ func (h *Handler) onPush(body []byte) {
 			}
 			h.closeTicket(c, id, "commit "+short, "✅ Closed by commit %s: %s", short, cm.URL)
 		}
+	}
+}
+
+type installPayload struct {
+	Action       string `json:"action"`
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+	Repositories []struct {
+		FullName string `json:"full_name"`
+	} `json:"repositories"`
+	RepositoriesAdded []struct {
+		FullName string `json:"full_name"`
+	} `json:"repositories_added"`
+	RepositoriesRemoved []struct {
+		FullName string `json:"full_name"`
+	} `json:"repositories_removed"`
+}
+
+func names(rs []struct {
+	FullName string `json:"full_name"`
+}) []string {
+	out := make([]string, 0, len(rs))
+	for _, r := range rs {
+		if r.FullName != "" {
+			out = append(out, r.FullName)
+		}
+	}
+	return out
+}
+
+func (h *Handler) onInstallation(body []byte) {
+	if h.cfg.Installs == nil {
+		return
+	}
+	var p installPayload
+	if json.Unmarshal(body, &p) != nil {
+		return
+	}
+	switch p.Action {
+	case "created":
+		_ = h.cfg.Installs.AddInstallRepos(p.Installation.ID, names(p.Repositories))
+	case "deleted":
+		_ = h.cfg.Installs.DeleteInstallation(p.Installation.ID)
+	}
+}
+
+func (h *Handler) onInstallationRepos(body []byte) {
+	if h.cfg.Installs == nil {
+		return
+	}
+	var p installPayload
+	if json.Unmarshal(body, &p) != nil {
+		return
+	}
+	if a := names(p.RepositoriesAdded); len(a) > 0 {
+		_ = h.cfg.Installs.AddInstallRepos(p.Installation.ID, a)
+	}
+	if rm := names(p.RepositoriesRemoved); len(rm) > 0 {
+		_ = h.cfg.Installs.RemoveInstallRepos(p.Installation.ID, rm)
 	}
 }
 

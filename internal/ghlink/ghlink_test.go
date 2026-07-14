@@ -152,6 +152,56 @@ func TestUnlinkedRepoIgnored(t *testing.T) {
 	}
 }
 
+// fakeInstalls records installation calls for the webhook tests.
+type fakeInstalls struct {
+	added, removed map[int64][]string
+	deleted        []int64
+}
+
+func (f *fakeInstalls) AddInstallRepos(id int64, r []string) error {
+	if f.added == nil {
+		f.added = map[int64][]string{}
+	}
+	f.added[id] = append(f.added[id], r...)
+	return nil
+}
+func (f *fakeInstalls) RemoveInstallRepos(id int64, r []string) error {
+	if f.removed == nil {
+		f.removed = map[int64][]string{}
+	}
+	f.removed[id] = append(f.removed[id], r...)
+	return nil
+}
+func (f *fakeInstalls) DeleteInstallation(id int64) error {
+	f.deleted = append(f.deleted, id)
+	return nil
+}
+
+func TestInstallationWebhooksLinkRepos(t *testing.T) {
+	c := newCore(t)
+	inst := &fakeInstalls{}
+	h := New(Config{Secret: []byte("s"), Installs: inst,
+		Resolve: func(string) (*core.Core, bool) { return c, true }})
+
+	created := `{"action":"created","installation":{"id":9},"repositories":[{"full_name":"me/repo"}]}`
+	send(t, h, "s", "installation", created)
+	if got := inst.added[9]; len(got) != 1 || got[0] != "me/repo" {
+		t.Fatalf("created added = %v, want [me/repo]", got)
+	}
+
+	addRepos := `{"action":"added","installation":{"id":9},"repositories_added":[{"full_name":"me/two"}]}`
+	send(t, h, "s", "installation_repositories", addRepos)
+	if got := inst.added[9]; len(got) != 2 {
+		t.Fatalf("after add, added = %v, want 2", got)
+	}
+
+	del := `{"action":"deleted","installation":{"id":9}}`
+	send(t, h, "s", "installation", del)
+	if len(inst.deleted) != 1 || inst.deleted[0] != 9 {
+		t.Fatalf("deleted = %v, want [9]", inst.deleted)
+	}
+}
+
 func shortID(id string) string {
 	if i := strings.LastIndexByte(id, '-'); i >= 0 {
 		return id[i+1:]

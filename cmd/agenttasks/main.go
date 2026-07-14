@@ -61,6 +61,7 @@ func main() {
 		OwnerGitHubLogin:    os.Getenv("AGENTTASKS_OWNER_GITHUB"),
 		OwnerSubject:        os.Getenv("AGENTTASKS_OWNER_SUBJECT"),
 		GitHubWebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		GitHubAppSlug:       os.Getenv("GITHUB_APP_SLUG"),
 		OwnerRepo:           os.Getenv("AGENTTASKS_OWNER_REPO"),
 		RateLimit:      20,
 		Logger:         logger,
