@@ -151,12 +151,13 @@ func (h *Handler) onPullRequest(body []byte) {
 	}
 	pr := p.PullRequest
 	text := pr.Title + "\n" + pr.Body
+	// Any reference links — a magic word, a #id, the bare ticket id, or the branch
+	// name (Linear-style: the reference IS the link; no "Closes" required).
+	refs := resolveAll(c, union(closeRefs(text), hashRefs(text), fullRefs(text, c.Prefix()), branchRefs(pr.Head.Ref)))
 
 	switch p.Action {
 	case "opened", "reopened", "ready_for_review", "edited":
-		// Link every referenced ticket and move it into progress.
-		refs := union(closeRefs(text), hashRefs(text), fullRefs(text, c.Prefix()), branchRefs(pr.Head.Ref))
-		for _, id := range resolveAll(c, refs) {
+		for _, id := range refs {
 			h.link(c, id, "🔗 Linked to PR #%d (%s): %s", pr.Number, p.Action, pr.HTMLURL)
 			h.inProgress(c, id)
 		}
@@ -164,7 +165,8 @@ func (h *Handler) onPullRequest(body []byte) {
 		if !pr.Merged {
 			return
 		}
-		for _, id := range resolveAll(c, closeRefs(text)) {
+		// Merging a PR completes every ticket it references — like Linear.
+		for _, id := range refs {
 			h.closeTicket(c, id, "merged PR #"+strconv.Itoa(pr.Number), "✅ Closed by merged PR #%d: %s", pr.Number, pr.HTMLURL)
 		}
 	}

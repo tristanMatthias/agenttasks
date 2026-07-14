@@ -95,6 +95,24 @@ func TestMergedPRClosesTicket(t *testing.T) {
 	}
 }
 
+func TestMergedPRClosesByReference_NoMagicWord(t *testing.T) {
+	c := newCore(t)
+	task, _ := c.Create(core.CreateParams{Title: "Referenced only"})
+	h := handler(c, "s")
+
+	// No "Closes" anywhere — the ticket is only referenced via the branch name.
+	body := `{"action":"closed","pull_request":{"number":8,"merged":true,` +
+		`"title":"Some work","body":"just a description","html_url":"https://gh/pr/8",` +
+		`"head":{"ref":"tristan/` + shortID(task.ID) + `-referenced-only"}},` +
+		`"repository":{"full_name":"me/repo","default_branch":"main"}}`
+	send(t, h, "s", "pull_request", body)
+
+	got, _ := c.Show(task.ID)
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed (referenced by branch, merged)", got.Status)
+	}
+}
+
 func TestOpenedPRLinksAndInProgress(t *testing.T) {
 	c := newCore(t)
 	task, _ := c.Create(core.CreateParams{Title: "Build it"})
