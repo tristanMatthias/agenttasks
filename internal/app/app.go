@@ -227,6 +227,12 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		RateLimit:           cfg.RateLimit,
 		RateBurst:           burst,
 		Metrics:             true,
+		// Hard delete: humans only. API keys (bots) authorize with a "key:" subject
+		// and are refused; the route is never an MCP tool (it's not an op).
+		AllowDelete: func(r *http.Request) bool {
+			id, ok := httpapi.IdentityFrom(r.Context())
+			return ok && !strings.HasPrefix(id.Subject, "key:")
+		},
 	})
 
 	// Broadcast every tenant mutation to that workspace's WebSocket clients (topic
