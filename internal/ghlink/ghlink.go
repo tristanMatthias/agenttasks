@@ -151,6 +151,7 @@ func (h *Handler) onPullRequest(body []byte) {
 	}
 	pr := p.PullRequest
 	text := pr.Title + "\n" + pr.Body
+	name := prName(pr.Title, pr.Number)
 	// Any reference links — a magic word, a #id, the bare ticket id, or the branch
 	// name (Linear-style: the reference IS the link; no "Closes" required).
 	refs := resolveAll(c, union(closeRefs(text), hashRefs(text), fullRefs(text, c.Prefix()), branchRefs(pr.Head.Ref)))
@@ -158,7 +159,7 @@ func (h *Handler) onPullRequest(body []byte) {
 	switch p.Action {
 	case "opened", "reopened", "ready_for_review", "edited":
 		for _, id := range refs {
-			h.link(c, id, "🔗 Linked to PR #%d (%s): %s", pr.Number, p.Action, pr.HTMLURL)
+			h.link(c, id, "Linked to [%s](%s)", name, pr.HTMLURL)
 			h.inProgress(c, id)
 		}
 	case "closed":
@@ -167,9 +168,17 @@ func (h *Handler) onPullRequest(body []byte) {
 		}
 		// Merging a PR completes every ticket it references — like Linear.
 		for _, id := range refs {
-			h.closeTicket(c, id, "merged PR #"+strconv.Itoa(pr.Number), "✅ Closed by merged PR #%d: %s", pr.Number, pr.HTMLURL)
+			h.closeTicket(c, id, "merged PR #"+strconv.Itoa(pr.Number), "Closed by [%s](%s)", name, pr.HTMLURL)
 		}
 	}
+}
+
+// prName is the PR title, or "PR #N" when the title is empty.
+func prName(title string, number int) string {
+	if strings.TrimSpace(title) != "" {
+		return title
+	}
+	return "PR #" + strconv.Itoa(number)
 }
 
 func (h *Handler) onPush(body []byte) {
@@ -190,7 +199,7 @@ func (h *Handler) onPush(body []byte) {
 			if len(short) > 7 {
 				short = short[:7]
 			}
-			h.closeTicket(c, id, "commit "+short, "✅ Closed by commit %s: %s", short, cm.URL)
+			h.closeTicket(c, id, "commit "+short, "Closed by commit [%s](%s)", short, cm.URL)
 		}
 	}
 }
@@ -265,7 +274,7 @@ func (h *Handler) onCreate(body []byte) {
 		return
 	}
 	for _, id := range resolveAll(c, branchRefs(p.Ref)) {
-		h.link(c, id, "🌿 Branch `%s` created for this ticket", p.Ref)
+		h.link(c, id, "Branch `%s` created", p.Ref)
 		h.inProgress(c, id)
 	}
 }
