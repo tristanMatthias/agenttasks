@@ -40,6 +40,8 @@ github.com/tristanMatthias/tasks v0.0.0-20260713221012-73d1ec4b45a2 h1:MTvS8Dq52
 github.com/tristanMatthias/tasks v0.0.0-20260713221012-73d1ec4b45a2/go.mod h1:WHBSLges1mRda31KwWcRk4lhma8SQuSL9O604JKujhw=
 github.com/tristanMatthias/tasks v0.0.0-20260713223940-fa12eec5de2a h1:J+BTibj5Xn2KteYHnUiWJ7QMij7aYQxYFj6neSKUU9M=
 github.com/tristanMatthias/tasks v0.0.0-20260713223940-fa12eec5de2a/go.mod h1:WHBSLges1mRda31KwWcRk4lhma8SQuSL9O604JKujhw=
+github.com/tristanMatthias/tasks v0.0.0-20260714003108-5f4df48b42f0 h1:pmD7eISdY5YFe1+AyUN6d9yPwMWN5SAijTS5Ssolrm0=
+github.com/tristanMatthias/tasks v0.0.0-20260714003108-5f4df48b42f0/go.mod h1:WHBSLges1mRda31KwWcRk4lhma8SQuSL9O604JKujhw=
 github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
 github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
 golang.org/x/mod v0.36.0 h1:JJjpVx6myfUsUdAzZuOSTTmRE0PfZeNWzzvKrP7amb4=
