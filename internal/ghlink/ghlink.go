@@ -151,7 +151,7 @@ func (h *Handler) onPullRequest(body []byte) {
 	}
 	pr := p.PullRequest
 	text := pr.Title + "\n" + pr.Body
-	name := prName(pr.Title, pr.Number)
+	name := prLinkText(pr.Title, pr.Number)
 	// Any reference links — a magic word, a #id, the bare ticket id, or the branch
 	// name (Linear-style: the reference IS the link; no "Closes" required).
 	refs := resolveAll(c, union(closeRefs(text), hashRefs(text), fullRefs(text, c.Prefix()), branchRefs(pr.Head.Ref)))
@@ -173,10 +173,11 @@ func (h *Handler) onPullRequest(body []byte) {
 	}
 }
 
-// prName is the PR title, or "PR #N" when the title is empty.
-func prName(title string, number int) string {
+// prLinkText is the link copy for a PR: "<title> #<number>", or just "PR #<n>"
+// when the title is empty.
+func prLinkText(title string, number int) string {
 	if strings.TrimSpace(title) != "" {
-		return title
+		return fmt.Sprintf("%s #%d", title, number)
 	}
 	return "PR #" + strconv.Itoa(number)
 }
