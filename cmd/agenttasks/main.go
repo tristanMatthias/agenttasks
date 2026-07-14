@@ -55,11 +55,13 @@ func main() {
 		OAuthSecret:    os.Getenv("AGENTTASKS_OAUTH_SECRET"),
 		BehindProxy:    os.Getenv("AGENTTASKS_BEHIND_PROXY") == "true",
 
-		GitHubClientID:     ghClientID,
-		GitHubClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
-		SessionSecret:      os.Getenv("AGENTTASKS_SESSION_SECRET"),
-		OwnerGitHubLogin:   os.Getenv("AGENTTASKS_OWNER_GITHUB"),
-		OwnerSubject:       os.Getenv("AGENTTASKS_OWNER_SUBJECT"),
+		GitHubClientID:      ghClientID,
+		GitHubClientSecret:  os.Getenv("GITHUB_CLIENT_SECRET"),
+		SessionSecret:       os.Getenv("AGENTTASKS_SESSION_SECRET"),
+		OwnerGitHubLogin:    os.Getenv("AGENTTASKS_OWNER_GITHUB"),
+		OwnerSubject:        os.Getenv("AGENTTASKS_OWNER_SUBJECT"),
+		GitHubWebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		OwnerRepo:           os.Getenv("AGENTTASKS_OWNER_REPO"),
 		RateLimit:      20,
 		Logger:         logger,
 	}

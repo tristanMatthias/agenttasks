@@ -110,6 +110,13 @@ CREATE TABLE IF NOT EXISTS identities (
   created_at  TEXT NOT NULL,
   PRIMARY KEY (provider, provider_id)
 );
+-- Which GitHub repo ("owner/name") feeds which workspace's board (for the
+-- Linear-style PR/commit auto-linking).
+CREATE TABLE IF NOT EXISTS repo_links (
+  repo         TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_invites_ws ON invites(workspace_id);
 `
 
@@ -155,6 +162,24 @@ func (s *Store) LinkIdentity(provider, providerID, subject, login string) error 
 		 VALUES (?,?,?,?,?)
 		 ON CONFLICT(provider, provider_id) DO UPDATE SET login=excluded.login`,
 		provider, providerID, subject, login, now())
+	return err
+}
+
+// RepoWorkspace returns the workspace a GitHub repo ("owner/name") is linked to.
+func (s *Store) RepoWorkspace(repo string) (string, bool) {
+	var ws string
+	if err := s.db.QueryRow(`SELECT workspace_id FROM repo_links WHERE repo=?`, repo).Scan(&ws); err != nil || ws == "" {
+		return "", false
+	}
+	return ws, true
+}
+
+// LinkRepo maps a GitHub repo to a workspace (idempotent).
+func (s *Store) LinkRepo(repo, workspaceID string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO repo_links (repo, workspace_id, created_at) VALUES (?,?,?)
+		 ON CONFLICT(repo) DO UPDATE SET workspace_id=excluded.workspace_id`,
+		repo, workspaceID, now())
 	return err
 }
 

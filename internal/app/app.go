@@ -13,10 +13,12 @@ import (
 	"strings"
 
 	"github.com/tristanMatthias/agenttasks/internal/ghauth"
+	"github.com/tristanMatthias/agenttasks/internal/ghlink"
 	"github.com/tristanMatthias/agenttasks/internal/oauth"
 	"github.com/tristanMatthias/agenttasks/internal/oidc"
 	"github.com/tristanMatthias/agenttasks/internal/tenant"
 	"github.com/tristanMatthias/agenttasks/internal/workspaces"
+	"github.com/tristanMatthias/tasks/pkg/core"
 	"github.com/tristanMatthias/tasks/pkg/httpapi"
 	"github.com/tristanMatthias/tasks/pkg/mcpsrv"
 	"github.com/tristanMatthias/tasks/web"
@@ -48,6 +50,11 @@ type Config struct {
 	// board's existing tenant subject) instead of minting a fresh one.
 	OwnerGitHubLogin string
 	OwnerSubject     string
+
+	// GitHub → board linking (Linear-style). WebhookSecret verifies the GitHub App
+	// webhook; OwnerRepo ("owner/name"), if set, is linked to the owner's board.
+	GitHubWebhookSecret string
+	OwnerRepo           string
 
 	// Auth overrides the built authenticator (used by tests). If set, JWKSURL is
 	// ignored.
@@ -236,6 +243,29 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	wsAPI.Register(mux)
 	if registerAuthRoutes != nil {
 		registerAuthRoutes(mux) // GitHub OAuth: /auth/github/{login,callback,logout}
+	}
+	// GitHub → board auto-linking (PRs/commits close & link tickets, Linear-style).
+	if cfg.GitHubWebhookSecret != "" {
+		if cfg.OwnerRepo != "" && cfg.OwnerSubject != "" {
+			if err := wsStore.LinkRepo(cfg.OwnerRepo, workspaces.PersonalID(cfg.OwnerSubject)); err != nil {
+				cfg.Logger.Warn("link owner repo", "err", err)
+			}
+		}
+		ghlink.New(ghlink.Config{
+			Secret: []byte(cfg.GitHubWebhookSecret),
+			Logger: cfg.Logger,
+			Resolve: func(repo string) (*core.Core, bool) {
+				ws, ok := wsStore.RepoWorkspace(repo)
+				if !ok {
+					return nil, false
+				}
+				c, err := mgr.CoreFor(ws)
+				if err != nil {
+					return nil, false
+				}
+				return c, true
+			},
+		}).Register(mux)
 	}
 	if cfg.GitHubClientID == "" && cfg.PublishableKey != "" {
 		sign := signInHandler(cfg.PublishableKey, frontendAPIFromPublishableKey(cfg.PublishableKey))
