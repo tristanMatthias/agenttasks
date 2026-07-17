@@ -113,6 +113,142 @@ func TestMergedPRClosesByReference_NoMagicWord(t *testing.T) {
 	}
 }
 
+// A hierarchical child id ("<base>.6.2") is dash-encoded in the branch
+// ("claude/<base>-6-2-impl"). branchRefs must rejoin the numeric segments so the
+// dotted child id is reconstructed and closed on merge.
+func TestMergedPRClosesDottedChildViaBranch(t *testing.T) {
+	c := newCore(t)
+	parent, _ := c.Create(core.CreateParams{Title: "Parent"})
+	child, _ := c.Create(core.CreateParams{Title: "Child", Parent: parent.ID})
+	// Sanity: the child id is hierarchical (has a dot).
+	if !strings.Contains(shortID(child.ID), ".") {
+		t.Fatalf("expected a dotted child id, got %q", child.ID)
+	}
+	dashed := strings.ReplaceAll(shortID(child.ID), ".", "-") // ps3t.6.2 -> ps3t-6-2
+
+	h := handler(c, "s")
+	body := `{"action":"closed","pull_request":{"number":9,"merged":true,` +
+		`"title":"L4 work","body":"no magic word here","html_url":"https://gh/pr/9",` +
+		`"head":{"ref":"claude/` + dashed + `-implementation-tz2wqc"}},` +
+		`"repository":{"full_name":"me/repo","default_branch":"main"}}`
+	send(t, h, "s", "pull_request", body)
+
+	got, _ := c.Show(child.ID)
+	if got.Status != "closed" {
+		t.Fatalf("child status = %q, want closed (dotted id via dash-encoded branch)", got.Status)
+	}
+	// The parent must NOT be closed — only the specific child the branch names.
+	if p, _ := c.Show(parent.ID); p.Status == "closed" {
+		t.Fatal("parent should not be closed")
+	}
+}
+
+// A merged PR whose branch names one ticket but whose body merely MENTIONS a
+// sibling must close only the branch ticket — the mentioned sibling gets linked,
+// never closed. (PR #836 mentioned active siblings ps3t.6.6/6.8/6.9.)
+func TestMergedPRLinksButDoesNotCloseMentionedSibling(t *testing.T) {
+	c := newCore(t)
+	parent, _ := c.Create(core.CreateParams{Title: "Parent"})
+	target, _ := c.Create(core.CreateParams{Title: "The PR's ticket", Parent: parent.ID})
+	sibling, _ := c.Create(core.CreateParams{Title: "A follow-up", Parent: parent.ID})
+
+	dashed := strings.ReplaceAll(shortID(target.ID), ".", "-")
+	h := handler(c, "s")
+	body := `{"action":"closed","pull_request":{"number":836,"merged":true,` +
+		`"title":"L4 engine","body":"Builds on ` + shortID(sibling.ID) + ` — follow-ups tracked separately.",` +
+		`"html_url":"https://gh/pull/836","head":{"ref":"claude/` + dashed + `-impl-x"}},` +
+		`"repository":{"full_name":"me/repo","default_branch":"main"}}`
+	send(t, h, "s", "pull_request", body)
+
+	if got, _ := c.Show(target.ID); got.Status != "closed" {
+		t.Fatalf("target status = %q, want closed", got.Status)
+	}
+	sib, _ := c.Show(sibling.ID)
+	if sib.Status == "closed" {
+		t.Fatal("a merely-MENTIONED sibling must not be closed")
+	}
+	if sib.CommentCount == 0 {
+		t.Fatal("the mentioned sibling should still be linked to the PR")
+	}
+}
+
+// A PR comment that references a ticket links it (in progress) but never closes
+// it — and repeated comment events don't spam duplicate links.
+func TestPRCommentLinksAndDedupes(t *testing.T) {
+	c := newCore(t)
+	task, _ := c.Create(core.CreateParams{Title: "Referenced in a comment"})
+	h := handler(c, "s")
+
+	body := `{"action":"created",` +
+		`"issue":{"number":836,"title":"Some PR","pull_request":{"url":"https://gh/pull/836"}},` +
+		`"comment":{"body":"this relates to ` + task.ID + `","html_url":"https://gh/pull/836#issuecomment-1"},` +
+		`"repository":{"full_name":"me/repo","default_branch":"main"}}`
+	send(t, h, "s", "issue_comment", body)
+
+	got, _ := c.Show(task.ID)
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress (linked by comment)", got.Status)
+	}
+	if got.CommentCount != 1 {
+		t.Fatalf("comment count = %d, want 1 link", got.CommentCount)
+	}
+	// A second identical comment event must not add another link.
+	send(t, h, "s", "issue_comment", body)
+	got, _ = c.Show(task.ID)
+	if got.CommentCount != 1 {
+		t.Fatalf("comment count after re-event = %d, want still 1 (deduped)", got.CommentCount)
+	}
+}
+
+// A non-PR issue comment is ignored (no pull_request block).
+func TestIssueCommentIgnoredWhenNotPR(t *testing.T) {
+	c := newCore(t)
+	task, _ := c.Create(core.CreateParams{Title: "x"})
+	h := handler(c, "s")
+	body := `{"action":"created","issue":{"number":5,"title":"just an issue"},` +
+		`"comment":{"body":"mentions ` + task.ID + `","html_url":"https://gh/issues/5"},` +
+		`"repository":{"full_name":"me/repo","default_branch":"main"}}`
+	send(t, h, "s", "issue_comment", body)
+	if got, _ := c.Show(task.ID); got.CommentCount != 0 {
+		t.Fatal("a plain issue comment must not link tickets")
+	}
+}
+
+func TestBareRefsDottedOnly(t *testing.T) {
+	got := bareRefs("Implements ps3t.6.2 and ps3t.6.8; not v236, not plain, see §1.5")
+	has := func(s string) bool {
+		for _, g := range got {
+			if g == s {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("ps3t.6.2") || !has("ps3t.6.8") {
+		t.Fatalf("bareRefs = %v, want the dotted ids", got)
+	}
+	if has("v236") || has("plain") {
+		t.Fatalf("bareRefs = %v, must not match non-dotted words", got)
+	}
+}
+
+func TestBranchRefsRejoinsNumericSegments(t *testing.T) {
+	got := branchRefs("claude/ps3t-6-2-implementation-tz2wqc")
+	want := "ps3t.6.2"
+	found := false
+	for _, r := range got {
+		if r == want {
+			found = true
+		}
+		if r == "ps3t" || r == "6" || r == "2" {
+			t.Fatalf("branchRefs leaked a shattered segment %q: %v", r, got)
+		}
+	}
+	if !found {
+		t.Fatalf("branchRefs = %v, want it to contain %q", got, want)
+	}
+}
+
 func TestOpenedPRLinksAndInProgress(t *testing.T) {
 	c := newCore(t)
 	task, _ := c.Create(core.CreateParams{Title: "Build it"})

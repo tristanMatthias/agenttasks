@@ -72,6 +72,12 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	switch r.Header.Get("X-GitHub-Event") {
 	case "pull_request":
 		h.onPullRequest(body)
+	case "issue_comment":
+		h.onIssueComment(body)
+	case "pull_request_review":
+		h.onReview(body)
+	case "pull_request_review_comment":
+		h.onReviewComment(body)
 	case "push":
 		h.onPush(body)
 	case "create":
@@ -133,6 +139,35 @@ type createPayload struct {
 	Repository repo   `json:"repository"`
 }
 
+type commentBody struct {
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+}
+
+// A conversation comment on a PR (issue_comment with a pull_request block).
+type issueCommentPayload struct {
+	Action string `json:"action"`
+	Issue  struct {
+		Number      int             `json:"number"`
+		Title       string          `json:"title"`
+		PullRequest json.RawMessage `json:"pull_request"` // present iff the issue is a PR
+	} `json:"issue"`
+	Comment    commentBody `json:"comment"`
+	Repository repo        `json:"repository"`
+}
+
+// A PR review (the review body) or an inline review comment.
+type reviewPayload struct {
+	Action      string      `json:"action"`
+	Review      commentBody `json:"review"`
+	Comment     commentBody `json:"comment"`
+	PullRequest struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+	} `json:"pull_request"`
+	Repository repo `json:"repository"`
+}
+
 func (h *Handler) boardFor(fullName string) (*core.Core, bool) {
 	if h.cfg.Resolve == nil {
 		return nil, false
@@ -152,25 +187,80 @@ func (h *Handler) onPullRequest(body []byte) {
 	pr := p.PullRequest
 	text := pr.Title + "\n" + pr.Body
 	name := prLinkText(pr.Title, pr.Number)
-	// Any reference links — a magic word, a #id, the bare ticket id, or the branch
-	// name (Linear-style: the reference IS the link; no "Closes" required).
-	refs := resolveAll(c, union(closeRefs(text), hashRefs(text), fullRefs(text, c.Prefix()), branchRefs(pr.Head.Ref)))
+
+	// Two classes of reference, deliberately treated differently (Linear-style):
+	//   closes   — an intentional "this PR completes X": a magic word
+	//              (Closes/Fixes/Resolves) or the branch the PR is built on.
+	//   mentions — a ticket merely referenced in the title/body (#id, the full
+	//              board-prefixed id, or a bare hierarchical id like ps3t.6.2).
+	// Merging CLOSES the first set and only LINKS the second — otherwise a PR
+	// that name-drops sibling/follow-up tickets would wrongly close them.
+	closes := resolveAll(c, union(closeRefs(text), branchRefs(pr.Head.Ref)))
+	mentions := resolveAll(c, union(hashRefs(text), fullRefs(text, c.Prefix()), bareRefs(text)))
 
 	switch p.Action {
 	case "opened", "reopened", "ready_for_review", "edited":
-		for _, id := range refs {
-			h.link(c, id, "Linked to [%s](%s)", name, pr.HTMLURL)
-			h.inProgress(c, id)
+		for _, id := range union(closes, mentions) {
+			h.linkOnce(c, id, pr.Number, name, pr.HTMLURL)
 		}
 	case "closed":
 		if !pr.Merged {
 			return
 		}
-		// Merging a PR completes every ticket it references — like Linear.
-		for _, id := range refs {
+		closed := map[string]bool{}
+		for _, id := range closes {
 			h.closeTicket(c, id, "merged PR #"+strconv.Itoa(pr.Number), "Closed by [%s](%s)", name, pr.HTMLURL)
+			closed[id] = true
+		}
+		// Mentioned-but-not-closed tickets: record the link (in case the mention
+		// only landed at merge), without closing them.
+		for _, id := range mentions {
+			if !closed[id] {
+				h.linkOnce(c, id, pr.Number, name, pr.HTMLURL)
+			}
 		}
 	}
+}
+
+// linkComment links every ticket a PR comment mentions (never closes — comments
+// are mentions, not completion signals). Shared by the three comment event
+// types so a reference in any of them counts.
+func (h *Handler) linkComment(repoFullName, text string, prNumber int, prTitle, url string) {
+	c, ok := h.boardFor(repoFullName)
+	if !ok {
+		return
+	}
+	name := prLinkText(prTitle, prNumber)
+	for _, id := range resolveAll(c, union(closeRefs(text), hashRefs(text), fullRefs(text, c.Prefix()), bareRefs(text))) {
+		h.linkOnce(c, id, prNumber, name, url)
+	}
+}
+
+func (h *Handler) onIssueComment(body []byte) {
+	var p issueCommentPayload
+	if json.Unmarshal(body, &p) != nil || len(p.Issue.PullRequest) == 0 {
+		return // not a PR comment (or unparsable)
+	}
+	if p.Action != "created" && p.Action != "edited" {
+		return
+	}
+	h.linkComment(p.Repository.FullName, p.Comment.Body, p.Issue.Number, p.Issue.Title, p.Comment.HTMLURL)
+}
+
+func (h *Handler) onReview(body []byte) {
+	var p reviewPayload
+	if json.Unmarshal(body, &p) != nil || p.Review.Body == "" {
+		return
+	}
+	h.linkComment(p.Repository.FullName, p.Review.Body, p.PullRequest.Number, p.PullRequest.Title, p.Review.HTMLURL)
+}
+
+func (h *Handler) onReviewComment(body []byte) {
+	var p reviewPayload
+	if json.Unmarshal(body, &p) != nil {
+		return
+	}
+	h.linkComment(p.Repository.FullName, p.Comment.Body, p.PullRequest.Number, p.PullRequest.Title, p.Comment.HTMLURL)
 }
 
 // prLinkText is the link copy for a PR: "<title> #<number>", or just "PR #<n>"
@@ -288,6 +378,34 @@ func (h *Handler) link(c *core.Core, id, format string, a ...any) {
 	}
 }
 
+// linkOnce links a ticket to a PR and moves it to In Progress, but only if it
+// isn't already linked to that PR — so repeated events (PR edits, and the many
+// review comments a bot posts) don't spam the ticket with duplicate links.
+func (h *Handler) linkOnce(c *core.Core, id string, prNumber int, name, url string) {
+	if h.alreadyLinkedToPR(c, id, prNumber) {
+		h.inProgress(c, id)
+		return
+	}
+	h.link(c, id, "Linked to [%s](%s)", name, url)
+	h.inProgress(c, id)
+}
+
+// alreadyLinkedToPR reports whether the ticket already carries a github link to
+// this PR (matched on the "/pull/<n>" that every PR/comment url shares).
+func (h *Handler) alreadyLinkedToPR(c *core.Core, id string, prNumber int) bool {
+	t, err := c.Show(id)
+	if err != nil {
+		return false
+	}
+	needle := fmt.Sprintf("/pull/%d", prNumber)
+	for _, cm := range t.Comments {
+		if cm.Author == actor && strings.Contains(cm.Text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) inProgress(c *core.Core, id string) {
 	t, err := c.Show(id)
 	if err != nil || t.Status == "closed" || t.Status == "in_progress" {
@@ -322,6 +440,14 @@ func closeRefs(text string) []string { return caps(closeRe.FindAllStringSubmatch
 // hashRefs returns #-prefixed references.
 func hashRefs(text string) []string { return caps(hashRe.FindAllStringSubmatch(text, -1)) }
 
+var bareRe = regexp.MustCompile(`\b([A-Za-z0-9]+(?:\.\d+)+)\b`)
+
+// bareRefs returns bare hierarchical child ids mentioned anywhere ("ps3t.6.2").
+// The dot-then-digits shape is distinctive enough to rarely appear in prose, and
+// resolveAll validates every hit against the board — so this can't false-match.
+// These are MENTIONS: they link a ticket to a PR, they never close it.
+func bareRefs(text string) []string { return caps(bareRe.FindAllStringSubmatch(text, -1)) }
+
 // fullRefs returns bare, board-prefixed ids mentioned anywhere (e.g.
 // "acme-nsvk"). Prefix-scoped so it can't false-match ordinary words.
 func fullRefs(text, prefix string) []string {
@@ -333,13 +459,44 @@ func fullRefs(text, prefix string) []string {
 }
 
 // branchRefs pulls candidate ids out of a branch name (split on / - _ .).
+//
+// Hierarchical child ids contain dots ("ps3t.6.2"), but branch names encode
+// those dots as dashes ("claude/ps3t-6-2-implementation"), so a naive split
+// would shatter the id into dead tokens (ps3t, 6, 2). We rejoin a segment with
+// the run of purely-numeric segments that follow it, reconstructing the dotted
+// id ("ps3t.6.2") — hierarchy levels are always numeric. resolveAll then keeps
+// only the ones that are real tickets, so the reconstruction can't false-match.
 func branchRefs(branch string) []string {
 	if branch == "" {
 		return nil
 	}
-	return strings.FieldsFunc(branch, func(r rune) bool {
+	segs := strings.FieldsFunc(branch, func(r rune) bool {
 		return r == '/' || r == '-' || r == '_' || r == '.'
 	})
+	var out []string
+	for i := 0; i < len(segs); {
+		tok := segs[i]
+		j := i + 1
+		for j < len(segs) && isAllDigits(segs[j]) {
+			tok += "." + segs[j]
+			j++
+		}
+		out = append(out, tok)
+		i = j
+	}
+	return out
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func caps(m [][]string) []string {
